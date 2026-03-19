@@ -157,6 +157,23 @@ The key challenge is that Balatro's game engine is event-driven and runs at vari
 
 ---
 
+## Future Plans
+
+### Near-term improvements
+- **Deck composition in obs** — add remaining rank counts (13) + suit counts (4) = 17 new features so the agent can reason about flush/straight odds and avoid fishing for already-played ranks
+- **Score simulation** — have Lua calculate predicted chip×mult for each candidate hand selection and include it in `state.json`; collapses most card-selection decisions into a lookup and dramatically simplifies the learning problem
+- **Joker-aware obs** — tag each joker as scoring / deck-fixing / economy + rarity (Common/Uncommon/Rare/Legendary); add temporal reward shaping bonuses for buying economy jokers early (antes 1-2) when their compounding value is highest
+- **Shop heuristics** — smarter buying logic: prioritize jokers that synergize with current hand type, skip jokers that conflict with deck composition, consider remaining antes when valuing economy vs. scoring jokers
+
+### Training speedup
+- **Speed mode** — override `love.draw = function() end`, zero all event delays, remove FPS cap; estimated 20-50x additional speedup on top of the current 32x, all within the existing single-instance setup
+- **Parallel training via WSL2/Xvfb** — run multiple headless Balatro instances in Docker containers with virtual displays; most practical path to parallel environments without rewriting the game engine; enables vectorized SB3 environments
+- **Lua scoring engine reimplementation** — reimplement Balatro's ~1,000-line scoring engine in pure Python/Lua outside the game loop; enables thousands of episodes per minute with no game window required; estimated ~1 month of work
+
+### Learning approaches
+- **Imitation learning** — behavioral cloning from recorded high-level Balatro gameplay; main bottleneck is video-to-state extraction (mapping screen pixels to game state); would give the agent a strong starting policy before RL fine-tuning
+- **Recurrent policy (LSTM)** — switch from MlpPolicy to RecurrentPPO (SB3-contrib); gives the agent memory across rounds so it can track which cards have been played and reason about deck state over time without needing explicit deck features in obs
+
 ## Limitations
 
 - **Single game instance:** No parallel environments; one Balatro window
