@@ -79,16 +79,28 @@ def main():
     n   = len(eps)
     print(f"Loaded {n} episodes")
 
-    episodes  = np.array([e["episode"]  for e in eps])
+    # Use sequential log index as x-axis — episode numbers and timesteps both
+    # reset to 0 on each training restart, making them non-monotonic.
+    idx       = np.arange(len(eps))
     rewards   = np.array([e["reward"]   for e in eps])
     lengths   = np.array([e["length"]   for e in eps])
     antes     = np.array([e["ante"]     for e in eps])
-    timesteps = np.array([e["timestep"] for e in eps])
+    raw_ts    = np.array([e["timestep"] for e in eps])
+
+    # Build cumulative timesteps across restarts
+    cum_ts = np.zeros(len(eps), dtype=int)
+    offset = 0
+    for i in range(len(eps)):
+        if i > 0 and raw_ts[i] < raw_ts[i - 1]:
+            offset += raw_ts[i - 1]
+        cum_ts[i] = raw_ts[i] + offset
 
     W        = args.window
     roll_rew = rolling(rewards, W)
     roll_len = rolling(lengths, W)
     roll_ant = rolling(antes,   W)
+
+    episodes  = idx   # alias for annotation code below
 
     # Best episodes to annotate
     best_idx = int(np.argmax(rewards))
@@ -108,16 +120,16 @@ def main():
         ax_dist = fig.add_subplot(gs[2, 1])
 
         # ── Panel 1: Reward ───────────────────────────────────────────────
-        ax_rew.plot(episodes, rewards, alpha=0.18, color=BLUE, linewidth=0.7)
-        ax_rew.plot(episodes, roll_rew, color=BLUE_D, linewidth=2.2,
+        ax_rew.plot(idx, rewards, alpha=0.18, color=BLUE, linewidth=0.7)
+        ax_rew.plot(idx, roll_rew, color=BLUE_D, linewidth=2.2,
                     label=f"Rolling avg ({W} ep)")
         ax_rew.axhline(0, color="#555566", linewidth=0.8, linestyle="--")
 
         # Annotate best reward
-        ax_rew.scatter([episodes[best_idx]], [rewards[best_idx]],
+        ax_rew.scatter([idx[best_idx]], [rewards[best_idx]],
                        color=GOLD, zorder=5, s=60)
-        ax_rew.annotate(f"Best: {rewards[best_idx]:.1f}\n(ep {episodes[best_idx]})",
-                        xy=(episodes[best_idx], rewards[best_idx]),
+        ax_rew.annotate(f"Best: {rewards[best_idx]:.1f}",
+                        xy=(idx[best_idx], rewards[best_idx]),
                         xytext=(20, -18), textcoords="offset points",
                         fontsize=8, color=GOLD,
                         arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.2))
@@ -129,18 +141,17 @@ def main():
         ax_rew.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
 
         # ── Panel 2: Ante reached ─────────────────────────────────────────
-        # Color-code by ante
         cmap = plt.get_cmap("RdYlGn")
         colors = [cmap((a - 1) / 7) for a in antes]
-        ax_ante.scatter(episodes, antes, alpha=0.35, s=8, color=colors)
-        ax_ante.plot(episodes, roll_ant, color=ORG_D, linewidth=2.2,
+        ax_ante.scatter(idx, antes, alpha=0.35, s=8, color=colors)
+        ax_ante.plot(idx, roll_ant, color=ORG_D, linewidth=2.2,
                      label=f"Rolling avg ({W} ep)")
 
         if best_ant_idx != best_idx:
-            ax_ante.scatter([episodes[best_ant_idx]], [antes[best_ant_idx]],
+            ax_ante.scatter([idx[best_ant_idx]], [antes[best_ant_idx]],
                             color=GOLD, zorder=5, s=60)
-            ax_ante.annotate(f"Ante {antes[best_ant_idx]}\n(ep {episodes[best_ant_idx]})",
-                             xy=(episodes[best_ant_idx], antes[best_ant_idx]),
+            ax_ante.annotate(f"Ante {antes[best_ant_idx]}",
+                             xy=(idx[best_ant_idx], antes[best_ant_idx]),
                              xytext=(15, 10), textcoords="offset points",
                              fontsize=8, color=GOLD,
                              arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.2))
@@ -153,22 +164,22 @@ def main():
         ax_ante.grid(True)
 
         # ── Panel 3: Episode length ───────────────────────────────────────
-        ax_len.plot(episodes, lengths, alpha=0.18, color=GRN, linewidth=0.7)
-        ax_len.plot(episodes, rolling(lengths, W), color=GRN_D, linewidth=2.2,
+        ax_len.plot(idx, lengths, alpha=0.18, color=GRN, linewidth=0.7)
+        ax_len.plot(idx, rolling(lengths, W), color=GRN_D, linewidth=2.2,
                     label=f"Rolling avg ({W} ep)")
         ax_len.set_ylabel("Steps", fontsize=9)
-        ax_len.set_xlabel("Episode", fontsize=9)
+        ax_len.set_xlabel("Log index (sequential)", fontsize=9)
         ax_len.set_title("Episode Length (steps)", fontsize=10, pad=6)
         ax_len.legend(loc="upper left", fontsize=7)
         ax_len.grid(True)
 
-        # Secondary x-axis (timesteps)
+        # Secondary x-axis: cumulative timesteps
         ax2 = ax_len.twiny()
         ax2.set_xlim(ax_len.get_xlim())
         tidx = np.linspace(0, n - 1, min(6, n), dtype=int)
-        ax2.set_xticks(episodes[tidx])
-        ax2.set_xticklabels([f"{timesteps[i]//1000}k" for i in tidx], fontsize=7)
-        ax2.set_xlabel("Timesteps", fontsize=8, labelpad=4)
+        ax2.set_xticks(idx[tidx])
+        ax2.set_xticklabels([f"{cum_ts[i]//1000}k" for i in tidx], fontsize=7)
+        ax2.set_xlabel("Cumulative Timesteps", fontsize=8, labelpad=4)
 
         # ── Panel 4: Ante distribution ────────────────────────────────────
         ante_counts = {}
@@ -200,9 +211,9 @@ def main():
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "-"*44)
     print(f"  Episodes         : {n}")
-    print(f"  Timesteps        : {timesteps[0]:,} - {timesteps[-1]:,}")
-    print(f"  Best reward      : {rewards.max():.2f}  (ep {episodes[best_idx]})")
-    print(f"  Best ante        : {int(antes.max())}  (ep {episodes[best_ant_idx]})")
+    print(f"  Cumulative steps : {cum_ts[-1]:,}")
+    print(f"  Best reward      : {rewards.max():.2f}  (log idx {best_idx})")
+    print(f"  Best ante        : {int(antes.max())}  (log idx {best_ant_idx})")
     print(f"  Avg reward       : {rewards.mean():.3f}")
     print(f"  Last {W} avg rew  : {roll_rew[-1]:.3f}")
     print(f"  Ante 2+ rate     : {100*(antes>=2).mean():.1f}%")
