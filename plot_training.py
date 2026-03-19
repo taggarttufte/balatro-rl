@@ -112,13 +112,12 @@ def main():
         fig.suptitle("Balatro RL — Training Progress", fontsize=15,
                      fontweight="bold", color="#E8E8F0", y=0.98)
 
-        gs = fig.add_gridspec(3, 2, hspace=0.42, wspace=0.32,
+        gs = fig.add_gridspec(3, 2, hspace=0.45, wspace=0.32,
                               left=0.07, right=0.96, top=0.93, bottom=0.06)
         ax_rew  = fig.add_subplot(gs[0, :])   # full width
         ax_ante = fig.add_subplot(gs[1, :])   # full width
-        ax_len  = fig.add_subplot(gs[2, 0])
-        ax_dist = fig.add_subplot(gs[2, 0])
-        ax_cmp  = fig.add_subplot(gs[2, 1])
+        ax_len  = fig.add_subplot(gs[2, 0])   # bottom left
+        ax_cmp  = fig.add_subplot(gs[2, 1])   # bottom right
 
         # ── Panel 1: Reward ───────────────────────────────────────────────
         ax_rew.plot(idx, rewards, alpha=0.18, color=BLUE, linewidth=0.7)
@@ -191,37 +190,12 @@ def main():
         ax2.set_xticklabels([f"{cum_ts[i]//1000}k" for i in tidx], fontsize=7)
         ax2.set_xlabel("Cumulative Timesteps", fontsize=8, labelpad=4)
 
-        # ── Panel 4: Ante distribution (last 1k only) ─────────────────────
-        K = min(1000, n)
-        last_antes = antes[-K:]
-        ante_counts = {}
-        for a in last_antes:
-            ante_counts[a] = ante_counts.get(a, 0) + 1
-        ante_labels = sorted(ante_counts)
-        ante_vals   = [ante_counts[a] for a in ante_labels]
-        bar_colors  = [cmap((a - 1) / 7) for a in ante_labels]
-
-        bars = ax_dist.bar(ante_labels, ante_vals, color=bar_colors,
-                           edgecolor="#3A3D4D", linewidth=0.8)
-        for bar, val in zip(bars, ante_vals):
-            pct = 100 * val / K
-            ax_dist.text(bar.get_x() + bar.get_width() / 2,
-                         bar.get_height() + max(ante_vals) * 0.01,
-                         f"{pct:.1f}%", ha="center", va="bottom",
-                         fontsize=7.5, color="#C8CDD8")
-
-        ax_dist.set_xlabel("Ante Reached", fontsize=9)
-        ax_dist.set_ylabel("Episodes", fontsize=9)
-        ax_dist.set_title(f"Ante Distribution (last {K} eps)", fontsize=10, pad=6)
-        ax_dist.xaxis.set_major_locator(ticker.MultipleLocator(1))
-        ax_dist.grid(True, axis="y")
-
-        # ── Panel 5: First 1k vs Last 1k comparison ───────────────────────
+        # ── Panel 4: First 1k vs Last 1k comparison ──────────────────────
         seg = min(1000, n // 2)
         first  = {"rew": rewards[:seg],   "ante": antes[:seg],   "len": lengths[:seg]}
         last   = {"rew": rewards[-seg:],  "ante": antes[-seg:],  "len": lengths[-seg:]}
 
-        metrics = ["Avg Reward", "Ante 2+ %", "Avg Steps"]
+        metrics = ["Avg\nReward", "Ante 2+\n(%)", "Avg\nSteps"]
         first_v = [
             float(np.mean(first["rew"])),
             float(100 * np.mean(first["ante"] >= 2)),
