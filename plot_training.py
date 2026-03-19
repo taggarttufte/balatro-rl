@@ -2,9 +2,9 @@
 plot_training.py  —  visualise Balatro RL training progress
 
 Usage:
-  python plot_training.py                  # plot and save to logs/training_progress.png
+  python plot_training.py                  # plot and save
   python plot_training.py --show           # also open interactive window
-  python plot_training.py --window 20      # rolling-average window (default 30)
+  python plot_training.py --window 50      # rolling-average window (default 50)
 """
 
 import argparse
@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")  # non-interactive by default
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
@@ -21,16 +21,45 @@ LOG_DIR = Path("logs")
 EP_LOG  = LOG_DIR / "episode_log.jsonl"
 OUT_PNG = LOG_DIR / "training_progress.png"
 
+STYLE = {
+    "figure.facecolor":  "#0F1117",
+    "axes.facecolor":    "#1A1D27",
+    "axes.edgecolor":    "#3A3D4D",
+    "axes.labelcolor":   "#C8CDD8",
+    "text.color":        "#C8CDD8",
+    "xtick.color":       "#8A8FA0",
+    "ytick.color":       "#8A8FA0",
+    "grid.color":        "#2A2D3D",
+    "grid.linewidth":    0.5,
+    "legend.facecolor":  "#1A1D27",
+    "legend.edgecolor":  "#3A3D4D",
+    "legend.labelcolor": "#C8CDD8",
+}
+
+BLUE   = "#4C9BE8"
+BLUE_D = "#1A6BB5"
+ORG    = "#E8944C"
+ORG_D  = "#B5621A"
+GRN    = "#6EBB7C"
+GRN_D  = "#2B8A3A"
+RED    = "#E8504C"
+GOLD   = "#F5C542"
+
+
 def load_episodes():
-    if not EP_LOG.exists():
-        raise FileNotFoundError(f"No episode log found at {EP_LOG}. Run train.py first.")
     records = []
     with EP_LOG.open() as f:
         for line in f:
             line = line.strip()
             if line:
                 records.append(json.loads(line))
-    return records
+    # Filter out corrupted Endless Mode episodes (ante > 8)
+    clean = [r for r in records if r.get("ante", 1) <= 8]
+    n_dropped = len(records) - len(clean)
+    if n_dropped:
+        print(f"  (dropped {n_dropped} corrupted Endless Mode episodes)")
+    return clean
+
 
 def rolling(values, window):
     out = []
@@ -39,86 +68,151 @@ def rolling(values, window):
         out.append(np.mean(values[start:i+1]))
     return np.array(out)
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--show",   action="store_true", help="Open interactive window")
-    parser.add_argument("--window", type=int, default=30, help="Rolling average window")
+    parser.add_argument("--show",   action="store_true")
+    parser.add_argument("--window", type=int, default=50)
     args = parser.parse_args()
 
     eps = load_episodes()
     n   = len(eps)
     print(f"Loaded {n} episodes")
 
-    episodes   = [e["episode"]  for e in eps]
-    rewards    = [e["reward"]   for e in eps]
-    lengths    = [e["length"]   for e in eps]
-    antes      = [e["ante"]     for e in eps]
-    timesteps  = [e["timestep"] for e in eps]
+    episodes  = np.array([e["episode"]  for e in eps])
+    rewards   = np.array([e["reward"]   for e in eps])
+    lengths   = np.array([e["length"]   for e in eps])
+    antes     = np.array([e["ante"]     for e in eps])
+    timesteps = np.array([e["timestep"] for e in eps])
 
-    W = args.window
+    W        = args.window
     roll_rew = rolling(rewards, W)
     roll_len = rolling(lengths, W)
+    roll_ant = rolling(antes,   W)
 
-    # ── Figure: 3 panels ──────────────────────────────────────────────────────
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-    fig.suptitle("Balatro RL — Training Progress", fontsize=14, fontweight="bold")
+    # Best episodes to annotate
+    best_idx = int(np.argmax(rewards))
+    best_ant_idx = int(np.argmax(antes))
 
-    ep_arr = np.array(episodes)
+    # ── Layout ────────────────────────────────────────────────────────────────
+    with plt.rc_context(STYLE):
+        fig = plt.figure(figsize=(14, 12))
+        fig.suptitle("Balatro RL — Training Progress", fontsize=15,
+                     fontweight="bold", color="#E8E8F0", y=0.98)
 
-    # Panel 1: Episode reward + rolling avg
-    ax = axes[0]
-    ax.plot(ep_arr, rewards,  alpha=0.25, color="#4C9BE8", linewidth=0.8, label="Episode reward")
-    ax.plot(ep_arr, roll_rew, color="#1A6BB5", linewidth=2,   label=f"Rolling avg ({W} ep)")
-    ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
-    ax.set_ylabel("Total Reward")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.set_title("Reward per Episode")
-    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
+        gs = fig.add_gridspec(3, 2, hspace=0.42, wspace=0.32,
+                              left=0.07, right=0.96, top=0.93, bottom=0.06)
+        ax_rew  = fig.add_subplot(gs[0, :])   # full width
+        ax_ante = fig.add_subplot(gs[1, :])   # full width
+        ax_len  = fig.add_subplot(gs[2, 0])
+        ax_dist = fig.add_subplot(gs[2, 1])
 
-    # Panel 2: Ante reached (progress proxy)
-    ax = axes[1]
-    ax.scatter(ep_arr, antes, alpha=0.3, s=10, color="#E87C4C", label="Ante reached")
-    ax.plot(ep_arr, rolling(antes, W), color="#B5521A", linewidth=2, label=f"Rolling avg ({W} ep)")
-    ax.set_ylabel("Ante Reached")
-    ax.set_ylim(0.5, 9)
-    ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
-    ax.legend(loc="upper left", fontsize=8)
-    ax.set_title("Ante Reached per Episode")
+        # ── Panel 1: Reward ───────────────────────────────────────────────
+        ax_rew.plot(episodes, rewards, alpha=0.18, color=BLUE, linewidth=0.7)
+        ax_rew.plot(episodes, roll_rew, color=BLUE_D, linewidth=2.2,
+                    label=f"Rolling avg ({W} ep)")
+        ax_rew.axhline(0, color="#555566", linewidth=0.8, linestyle="--")
 
-    # Panel 3: Episode length (hands played)
-    ax = axes[2]
-    ax.plot(ep_arr, lengths,  alpha=0.25, color="#7CBB6E", linewidth=0.8, label="Steps per episode")
-    ax.plot(ep_arr, roll_len, color="#3A8A2B", linewidth=2,   label=f"Rolling avg ({W} ep)")
-    ax.set_ylabel("Steps (hands/discards)")
-    ax.set_xlabel("Episode")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.set_title("Episode Length")
+        # Annotate best reward
+        ax_rew.scatter([episodes[best_idx]], [rewards[best_idx]],
+                       color=GOLD, zorder=5, s=60)
+        ax_rew.annotate(f"Best: {rewards[best_idx]:.1f}\n(ep {episodes[best_idx]})",
+                        xy=(episodes[best_idx], rewards[best_idx]),
+                        xytext=(20, -18), textcoords="offset points",
+                        fontsize=8, color=GOLD,
+                        arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.2))
 
-    # Secondary x-axis: timesteps
-    ax2 = axes[2].twiny()
-    ax2.set_xlim(axes[2].get_xlim())
-    ts_ticks = np.linspace(0, n-1, min(6, n), dtype=int)
-    ax2.set_xticks(ts_ticks)
-    ax2.set_xticklabels([f"{timesteps[i]//1000}k" for i in ts_ticks], fontsize=7)
-    ax2.set_xlabel("Timesteps", fontsize=8)
+        ax_rew.set_ylabel("Total Reward", fontsize=10)
+        ax_rew.set_title("Reward per Episode", fontsize=11, pad=6)
+        ax_rew.legend(loc="upper left", fontsize=8)
+        ax_rew.grid(True)
+        ax_rew.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
 
-    plt.tight_layout()
-    fig.savefig(OUT_PNG, dpi=150, bbox_inches="tight")
-    print(f"Saved plot to {OUT_PNG}")
+        # ── Panel 2: Ante reached ─────────────────────────────────────────
+        # Color-code by ante
+        cmap = plt.get_cmap("RdYlGn")
+        colors = [cmap((a - 1) / 7) for a in antes]
+        ax_ante.scatter(episodes, antes, alpha=0.35, s=8, color=colors)
+        ax_ante.plot(episodes, roll_ant, color=ORG_D, linewidth=2.2,
+                     label=f"Rolling avg ({W} ep)")
 
-    # Print summary stats
-    print(f"\n{'─'*40}")
-    print(f"  Total episodes : {n}")
-    print(f"  Best reward    : {max(rewards):.2f}  (ep {episodes[rewards.index(max(rewards))]})")
-    print(f"  Best ante      : {max(antes)}  (ep {episodes[antes.index(max(antes))]})")
-    print(f"  Avg reward     : {np.mean(rewards):.2f}  (last {W}: {roll_rew[-1]:.2f})")
-    print(f"  Avg ante       : {np.mean(antes):.2f}  (last {W}: {rolling(antes,W)[-1]:.2f})")
-    print(f"  Avg ep length  : {np.mean(lengths):.1f}  (last {W}: {roll_len[-1]:.1f})")
-    print(f"{'─'*40}")
+        if best_ant_idx != best_idx:
+            ax_ante.scatter([episodes[best_ant_idx]], [antes[best_ant_idx]],
+                            color=GOLD, zorder=5, s=60)
+            ax_ante.annotate(f"Ante {antes[best_ant_idx]}\n(ep {episodes[best_ant_idx]})",
+                             xy=(episodes[best_ant_idx], antes[best_ant_idx]),
+                             xytext=(15, 10), textcoords="offset points",
+                             fontsize=8, color=GOLD,
+                             arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.2))
+
+        ax_ante.set_ylabel("Ante Reached", fontsize=10)
+        ax_ante.set_title("Ante Reached per Episode  (green = deeper)", fontsize=11, pad=6)
+        ax_ante.set_ylim(0.5, 8.5)
+        ax_ante.yaxis.set_major_locator(ticker.MultipleLocator(1))
+        ax_ante.legend(loc="upper left", fontsize=8)
+        ax_ante.grid(True)
+
+        # ── Panel 3: Episode length ───────────────────────────────────────
+        ax_len.plot(episodes, lengths, alpha=0.18, color=GRN, linewidth=0.7)
+        ax_len.plot(episodes, rolling(lengths, W), color=GRN_D, linewidth=2.2,
+                    label=f"Rolling avg ({W} ep)")
+        ax_len.set_ylabel("Steps", fontsize=9)
+        ax_len.set_xlabel("Episode", fontsize=9)
+        ax_len.set_title("Episode Length (steps)", fontsize=10, pad=6)
+        ax_len.legend(loc="upper left", fontsize=7)
+        ax_len.grid(True)
+
+        # Secondary x-axis (timesteps)
+        ax2 = ax_len.twiny()
+        ax2.set_xlim(ax_len.get_xlim())
+        tidx = np.linspace(0, n - 1, min(6, n), dtype=int)
+        ax2.set_xticks(episodes[tidx])
+        ax2.set_xticklabels([f"{timesteps[i]//1000}k" for i in tidx], fontsize=7)
+        ax2.set_xlabel("Timesteps", fontsize=8, labelpad=4)
+
+        # ── Panel 4: Ante distribution ────────────────────────────────────
+        ante_counts = {}
+        for a in antes:
+            ante_counts[a] = ante_counts.get(a, 0) + 1
+        ante_labels = sorted(ante_counts)
+        ante_vals   = [ante_counts[a] for a in ante_labels]
+        bar_colors  = [cmap((a - 1) / 7) for a in ante_labels]
+
+        bars = ax_dist.bar(ante_labels, ante_vals, color=bar_colors,
+                           edgecolor="#3A3D4D", linewidth=0.8)
+        for bar, val in zip(bars, ante_vals):
+            pct = 100 * val / n
+            ax_dist.text(bar.get_x() + bar.get_width() / 2,
+                         bar.get_height() + max(ante_vals) * 0.01,
+                         f"{pct:.1f}%", ha="center", va="bottom",
+                         fontsize=7.5, color="#C8CDD8")
+
+        ax_dist.set_xlabel("Ante Reached", fontsize=9)
+        ax_dist.set_ylabel("Episodes", fontsize=9)
+        ax_dist.set_title("Ante Distribution (all runs)", fontsize=10, pad=6)
+        ax_dist.xaxis.set_major_locator(ticker.MultipleLocator(1))
+        ax_dist.grid(True, axis="y")
+
+        plt.savefig(OUT_PNG, dpi=150, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
+        print(f"Saved to {OUT_PNG}")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print("\n" + "-"*44)
+    print(f"  Episodes         : {n}")
+    print(f"  Timesteps        : {timesteps[0]:,} - {timesteps[-1]:,}")
+    print(f"  Best reward      : {rewards.max():.2f}  (ep {episodes[best_idx]})")
+    print(f"  Best ante        : {int(antes.max())}  (ep {episodes[best_ant_idx]})")
+    print(f"  Avg reward       : {rewards.mean():.3f}")
+    print(f"  Last {W} avg rew  : {roll_rew[-1]:.3f}")
+    print(f"  Ante 2+ rate     : {100*(antes>=2).mean():.1f}%")
+    print(f"  Ante 3+ rate     : {100*(antes>=3).mean():.2f}%")
+    print("-"*44)
 
     if args.show:
-        matplotlib.use("TkAgg")
-        plt.show()
+        import subprocess, sys
+        subprocess.Popen(["start", str(OUT_PNG)], shell=True)
+
 
 if __name__ == "__main__":
     main()
