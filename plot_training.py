@@ -117,7 +117,8 @@ def main():
         ax_rew  = fig.add_subplot(gs[0, :])   # full width
         ax_ante = fig.add_subplot(gs[1, :])   # full width
         ax_len  = fig.add_subplot(gs[2, 0])
-        ax_dist = fig.add_subplot(gs[2, 1])
+        ax_dist = fig.add_subplot(gs[2, 0])
+        ax_cmp  = fig.add_subplot(gs[2, 1])
 
         # ── Panel 1: Reward ───────────────────────────────────────────────
         ax_rew.plot(idx, rewards, alpha=0.18, color=BLUE, linewidth=0.7)
@@ -133,6 +134,15 @@ def main():
                         xytext=(20, -18), textcoords="offset points",
                         fontsize=8, color=GOLD,
                         arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.2))
+
+        # Mark the bad-checkpoint flatline (length=1, reward=-2 streak)
+        flat = [i for i in range(len(eps)) if lengths[i] == 1 and rewards[i] <= -1.9]
+        if flat:
+            x0, x1 = flat[0], flat[-1]
+            ax_rew.axvspan(x0 - 1, x1 + 1, color="#FF4444", alpha=0.15, zorder=0)
+            ax_rew.text((x0 + x1) / 2, ax_rew.get_ylim()[1] if ax_rew.get_ylim()[1] > 0 else 2,
+                        "bad ckpt", ha="center", va="top", fontsize=7,
+                        color="#FF9999", style="italic")
 
         ax_rew.set_ylabel("Total Reward", fontsize=10)
         ax_rew.set_title("Reward per Episode", fontsize=11, pad=6)
@@ -181,9 +191,11 @@ def main():
         ax2.set_xticklabels([f"{cum_ts[i]//1000}k" for i in tidx], fontsize=7)
         ax2.set_xlabel("Cumulative Timesteps", fontsize=8, labelpad=4)
 
-        # ── Panel 4: Ante distribution ────────────────────────────────────
+        # ── Panel 4: Ante distribution (last 1k only) ─────────────────────
+        K = min(1000, n)
+        last_antes = antes[-K:]
         ante_counts = {}
-        for a in antes:
+        for a in last_antes:
             ante_counts[a] = ante_counts.get(a, 0) + 1
         ante_labels = sorted(ante_counts)
         ante_vals   = [ante_counts[a] for a in ante_labels]
@@ -192,7 +204,7 @@ def main():
         bars = ax_dist.bar(ante_labels, ante_vals, color=bar_colors,
                            edgecolor="#3A3D4D", linewidth=0.8)
         for bar, val in zip(bars, ante_vals):
-            pct = 100 * val / n
+            pct = 100 * val / K
             ax_dist.text(bar.get_x() + bar.get_width() / 2,
                          bar.get_height() + max(ante_vals) * 0.01,
                          f"{pct:.1f}%", ha="center", va="bottom",
@@ -200,9 +212,44 @@ def main():
 
         ax_dist.set_xlabel("Ante Reached", fontsize=9)
         ax_dist.set_ylabel("Episodes", fontsize=9)
-        ax_dist.set_title("Ante Distribution (all runs)", fontsize=10, pad=6)
+        ax_dist.set_title(f"Ante Distribution (last {K} eps)", fontsize=10, pad=6)
         ax_dist.xaxis.set_major_locator(ticker.MultipleLocator(1))
         ax_dist.grid(True, axis="y")
+
+        # ── Panel 5: First 1k vs Last 1k comparison ───────────────────────
+        seg = min(1000, n // 2)
+        first  = {"rew": rewards[:seg],   "ante": antes[:seg],   "len": lengths[:seg]}
+        last   = {"rew": rewards[-seg:],  "ante": antes[-seg:],  "len": lengths[-seg:]}
+
+        metrics = ["Avg Reward", "Ante 2+ %", "Avg Steps"]
+        first_v = [
+            float(np.mean(first["rew"])),
+            float(100 * np.mean(first["ante"] >= 2)),
+            float(np.mean(first["len"])),
+        ]
+        last_v  = [
+            float(np.mean(last["rew"])),
+            float(100 * np.mean(last["ante"] >= 2)),
+            float(np.mean(last["len"])),
+        ]
+
+        x_cmp = np.arange(len(metrics))
+        w = 0.35
+        b1 = ax_cmp.bar(x_cmp - w/2, first_v, w, label=f"First {seg}", color=RED,   alpha=0.8, edgecolor="#3A3D4D")
+        b2 = ax_cmp.bar(x_cmp + w/2, last_v,  w, label=f"Last {seg}",  color=GRN_D, alpha=0.8, edgecolor="#3A3D4D")
+
+        for bar, val in zip(list(b1) + list(b2), first_v + last_v):
+            fmt = f"{val:.1f}"
+            ax_cmp.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + abs(min(first_v + last_v)) * 0.03,
+                        fmt, ha="center", va="bottom", fontsize=7.5, color="#C8CDD8")
+
+        ax_cmp.set_xticks(x_cmp)
+        ax_cmp.set_xticklabels(metrics, fontsize=8)
+        ax_cmp.set_title(f"First {seg} vs Last {seg} Episodes", fontsize=10, pad=6)
+        ax_cmp.legend(fontsize=7)
+        ax_cmp.axhline(0, color="#555566", linewidth=0.6)
+        ax_cmp.grid(True, axis="y")
 
         plt.savefig(OUT_PNG, dpi=150, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
