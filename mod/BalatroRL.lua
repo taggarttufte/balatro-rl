@@ -321,23 +321,14 @@ Game.update = function(self, dt)
             BalatroRL.write("blind_select")
         else
         local bod = G.GAME and G.GAME.blind_on_deck
-        -- Skip The Hook boss blind — its discard mechanic causes game crashes at high antes.
-        -- Treat as terminal and start a new run. PoC exclusion, document as known limitation.
+        -- Log when The Hook is the upcoming/current boss for diagnostics
         local rr_choices = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices
         local boss_key   = rr_choices and rr_choices["Boss"]
         if bod == "Boss" and boss_key == "bl_hook" and not BalatroRL._hook_skip_fired then
             BalatroRL._hook_skip_fired = true
-            love.filesystem.append(LOG_FILE, os.time() .. " [HOOK] BLIND_SELECT: The Hook detected — SKIP fired, forcing new_run\n")
-            G.E_MANAGER:add_event(Event({
-                trigger = "after",
-                delay   = 0.5,
-                func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
-            }))
-        elseif bod == "Boss" and boss_key == "bl_hook" then
-            love.filesystem.append(LOG_FILE, os.time() .. " [HOOK] BLIND_SELECT: The Hook detected — skip already fired\n")
+            love.filesystem.append(LOG_FILE, os.time() .. " [HOOK] BLIND_SELECT: The Hook is boss — letting play proceed, relying on WON watchdog delay\n")
         end
-        local is_hook_boss = (bod == "Boss" and boss_key == "bl_hook")
-        if bod and not BalatroRL._blind_fired and not is_hook_boss then
+        if bod and not BalatroRL._blind_fired then
             BalatroRL._blind_fired   = true
             BalatroRL._blind_fire_at = love.timer.getTime() + 0.5
         end
