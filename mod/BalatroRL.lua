@@ -405,10 +405,13 @@ Game.update = function(self, dt)
     -- Lua shop: buy affordable jokers, then leave
     if BalatroRL.cfg().lua_nav and G.STATE == G.STATES.SHOP then
         if not BalatroRL._shop_fired then
-            BalatroRL._shop_fired   = true
-            BalatroRL._shop_buy_at  = love.timer.getTime() + 0.8   -- wait for shop to build
-            BalatroRL._shop_leave_at = nil
-            BalatroRL._shop_bought  = false
+            BalatroRL._shop_fired      = true
+            BalatroRL._shop_buy_at     = love.timer.getTime() + 0.8
+            BalatroRL._shop_sell_at    = nil   -- phase 2: sell weak joker
+            BalatroRL._shop_upgrade_at = nil   -- phase 3: buy upgrade after sell
+            BalatroRL._shop_leave_at   = nil
+            BalatroRL._shop_sell_card  = nil
+            BalatroRL._shop_buy_card   = nil
         end
         -- Helper: effective value of a joker card (rarity + edition bonus)
         -- Negative jokers are flagged unsellable (returns nil)
@@ -453,13 +456,12 @@ Game.update = function(self, dt)
                     end
                 end
 
-                -- Phase 1b: sell-upgrade — if slots full, try to swap a weak joker for a better shop joker
-                slots_used = #G.jokers.cards  -- re-read after buys
+                -- Check for sell-upgrade opportunity (execute in next phase after delay)
+                slots_used = #G.jokers.cards
                 if slots_used >= slots_max and G.shop_jokers.cards then
-                    -- Find weakest sellable held joker (lowest value, skip Negatives)
                     local sell_card  = nil
-                    local sell_value = nil
                     local sell_score = math.huge
+                    local sell_value = 0
                     for _, held in ipairs(G.jokers.cards or {}) do
                         local sc = joker_value(held)
                         if sc and sc < sell_score then
@@ -468,63 +470,69 @@ Game.update = function(self, dt)
                             sell_value = held.sell_cost or 0
                         end
                     end
-                    -- Find best shop joker that is a strict upgrade and affordable after sell
                     if sell_card then
                         local best_shop = nil
-                        local best_sc   = sell_score   -- must beat held joker's score
+                        local best_sc   = sell_score
                         for _, scard in ipairs(G.shop_jokers.cards or {}) do
                             local sc   = joker_value(scard)
                             local cost = scard.cost or 0
-                            if sc and sc > best_sc
-                               and (remaining + sell_value) >= cost then
+                            if sc and sc > best_sc and (remaining + sell_value) >= cost then
                                 best_sc   = sc
                                 best_shop = scard
                             end
                         end
                         if best_shop then
-                            -- Sell the weak joker, then buy the upgrade
-                            local sell_ok = pcall(G.FUNCS.sell_card,
-                                {config = {ref_table = sell_card, selling = true}})
-                            if sell_ok then
-                                remaining  = remaining + sell_value
-                                slots_used = slots_used - 1
-                                local buy_ok = pcall(G.FUNCS.buy_from_shop,
-                                    {config = {ref_table = best_shop, id = "buy"}})
-                                if buy_ok then
-                                    remaining  = remaining  - (best_shop.cost or 0)
-                                    slots_used = slots_used + 1
-                                end
-                                love.filesystem.append(LOG_FILE, os.time()
-                                    .. " lua_nav: sell-upgrade sold_score=" .. tostring(sell_score)
-                                    .. " bought_score=" .. tostring(best_sc)
-                                    .. " sell_val=$" .. tostring(sell_value)
-                                    .. " buy_cost=$" .. tostring(best_shop.cost or 0)
-                                    .. (buy_ok and " OK\n" or " BUY_FAILED\n"))
-                            end
+                            -- Store for deferred execution — sell and buy need separate frames
+                            BalatroRL._shop_sell_card  = sell_card
+                            BalatroRL._shop_buy_card   = best_shop
+                            BalatroRL._shop_sell_score = sell_score
+                            BalatroRL._shop_buy_score  = best_sc
+                            BalatroRL._shop_sell_at    = love.timer.getTime() + 0.3
                         end
                     end
                 end
 
-                -- Phase 1c: reroll once if nothing useful and cash allows
+                -- Reroll once if nothing useful and cash allows
                 local reroll_cost = (G.GAME.current_round and G.GAME.current_round.reroll_cost) or 5
-                local bought_anything = slots_used > (#G.jokers.cards)  -- slots changed = bought something
-                if remaining > reroll_cost * 2 then
-                    -- Check if any shop joker is useful (affordable or would be after one sell)
+                if remaining > reroll_cost * 2 and not BalatroRL._shop_sell_at then
                     local has_useful = false
                     for _, scard in ipairs(G.shop_jokers.cards or {}) do
-                        if scard.ability and scard.ability.set == "Joker" then
-                            has_useful = true; break
-                        end
+                        if scard.ability and scard.ability.set == "Joker" then has_useful = true; break end
                     end
                     if not has_useful then
                         local rok = pcall(G.FUNCS.reroll_shop, {config = {}})
                         love.filesystem.append(LOG_FILE, os.time()
                             .. " lua_nav: reroll cost=$" .. tostring(reroll_cost)
-                            .. " remaining=$" .. tostring(remaining)
                             .. (rok and " OK\n" or " FAILED\n"))
                     end
                 end
             end
+            if not BalatroRL._shop_sell_at then
+                BalatroRL._shop_leave_at = love.timer.getTime() + 0.5
+            end
+        end
+
+        -- Phase 2: sell weak joker (deferred from buy phase)
+        if BalatroRL._shop_sell_at and love.timer.getTime() >= BalatroRL._shop_sell_at then
+            BalatroRL._shop_sell_at = nil
+            local sell_ok = pcall(G.FUNCS.sell_card,
+                {config = {ref_table = BalatroRL._shop_sell_card, selling = true}})
+            love.filesystem.append(LOG_FILE, os.time()
+                .. " lua_nav: sell-upgrade SELL score=" .. tostring(BalatroRL._shop_sell_score)
+                .. (sell_ok and " OK\n" or " FAILED\n"))
+            -- Schedule buy after sell event has processed
+            BalatroRL._shop_upgrade_at = love.timer.getTime() + 0.3
+        end
+
+        -- Phase 3: buy upgrade after sell has processed
+        if BalatroRL._shop_upgrade_at and love.timer.getTime() >= BalatroRL._shop_upgrade_at then
+            BalatroRL._shop_upgrade_at = nil
+            local buy_ok = pcall(G.FUNCS.buy_from_shop,
+                {config = {ref_table = BalatroRL._shop_buy_card, id = "buy"}})
+            love.filesystem.append(LOG_FILE, os.time()
+                .. " lua_nav: sell-upgrade BUY score=" .. tostring(BalatroRL._shop_buy_score)
+                .. " cost=$" .. tostring((BalatroRL._shop_buy_card and BalatroRL._shop_buy_card.cost) or 0)
+                .. (buy_ok and " OK\n" or " FAILED\n"))
             BalatroRL._shop_leave_at = love.timer.getTime() + 0.5
         end
         -- Phase 2: leave shop
@@ -540,9 +548,13 @@ Game.update = function(self, dt)
             end
         end
     else
-        BalatroRL._shop_fired    = false
-        BalatroRL._shop_buy_at   = nil
-        BalatroRL._shop_leave_at = nil
+        BalatroRL._shop_fired      = false
+        BalatroRL._shop_buy_at     = nil
+        BalatroRL._shop_sell_at    = nil
+        BalatroRL._shop_upgrade_at = nil
+        BalatroRL._shop_leave_at   = nil
+        BalatroRL._shop_sell_card  = nil
+        BalatroRL._shop_buy_card   = nil
     end
 
     -- Lua new run: fires 1s after entering GAME_OVER
@@ -612,6 +624,15 @@ Game.update = function(self, dt)
                                     rr.blind_states["Small"] = "Unplayed"
                                     rr.blind_states["Big"]   = "Unplayed"
                                     rr.blind_states["Boss"]  = "Unplayed"
+                                end
+                                -- Pick a new boss for the next ante from the boss pool
+                                -- (prevents same boss repeating every ante when watchdog bypasses NEW_ROUND)
+                                if rr.blind_choices and G.GAME.boss_pool and #G.GAME.boss_pool > 0 then
+                                    local idx = math.random(#G.GAME.boss_pool)
+                                    rr.blind_choices["Boss"] = G.GAME.boss_pool[idx]
+                                    love.filesystem.append(LOG_FILE, os.time()
+                                        .. " watchdog: new boss for ante " .. tostring(rr.ante)
+                                        .. " = " .. tostring(G.GAME.boss_pool[idx]) .. "\n")
                                 end
                             end
                         end
