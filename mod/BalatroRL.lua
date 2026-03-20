@@ -336,7 +336,8 @@ Game.update = function(self, dt)
         elseif bod == "Boss" and boss_key == "bl_hook" then
             love.filesystem.append(LOG_FILE, os.time() .. " [HOOK] BLIND_SELECT: The Hook detected — skip already fired\n")
         end
-        if bod and not BalatroRL._blind_fired and boss_key ~= "bl_hook" then
+        local is_hook_boss = (bod == "Boss" and boss_key == "bl_hook")
+        if bod and not BalatroRL._blind_fired and not is_hook_boss then
             BalatroRL._blind_fired   = true
             BalatroRL._blind_fire_at = love.timer.getTime() + 0.5
         end
