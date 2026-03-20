@@ -103,7 +103,15 @@ ep 700-799: avg=-0.752   ← current
 ## Future Development Ideas
 
 ### Near-term (tractable)
-0. **Deck composition in obs — do this before next long training run (requires fresh start)**
+0. **Joker sell-upgrade in shop heuristic**
+   - Current behavior: when slots are full, agent skips shop entirely and banks cash — observed holding $50+ by ante 3 while ignoring shop
+   - Fix: if slots full AND a shop joker's rarity > min rarity of held jokers AND sell_value + current_cash >= shop_joker_cost → sell weakest joker, buy upgrade
+   - Rarity field: `card.config.center.rarity` (1=Common, 2=Uncommon, 3=Rare, 4=Legendary)
+   - "Weakest" = lowest sell value (proxy for rarity; don't sell Uncommon for Uncommon, strict upgrades only)
+   - Also consider rerolling shop when slots full and nothing is an upgrade — `$5` reroll is often better than banking
+   - Implementation: ~10-15 lines in Lua shop buy loop, after the existing joker buy logic
+
+1. **Deck composition in obs — do this before next long training run (requires fresh start)**
    - Add remaining deck counts to obs: rank counts (13) + suit counts (4) = **17 new features**
    - OBS_SIZE: 119 → 136; PPO input layer auto-resizes, existing checkpoints incompatible (start fresh)
    - **Lua side**: iterate `G.deck.cards` each poll tick, count rank/suit, write as two arrays to state.json
@@ -171,3 +179,173 @@ ep 700-799: avg=-0.752   ← current
 | `logs/episode_log.jsonl` | Per-episode stats (all runs) |
 | `logs/best_runs.jsonl` | Full action sequences of best episodes |
 | `checkpoints/` | PPO model checkpoints |
+
+## V2 Architecture Plan
+
+### Core Idea
+Replace MultiBinary(9) card selection with Discrete(20) pre-ranked action selection.
+Lua pre-computes all valid plays and discards, ranks them, and includes them in state.json.
+Agent picks one of 20 options instead of setting 9 bits blindly.
+
+### Action Space: Discrete(20)
+```
+[0-9]   → play one of top 10 hands (ranked by chip×mult, highest first)
+[10-19] → discard one of top 10 card subsets (ranked by draw potential)
+```
+Lua enumerates all ~218 card combinations (C(8,1) through C(8,5)), scores each,
+returns top 10 plays and top 10 discards in state.json.
+
+### Obs Space Additions (~206 total features)
+- 10 play options × (chips, mult, hand_type_id, num_cards) = 40 features
+- 10 discard options × (expected_gain, cards_kept_type, hand_type_targeted) = 30 features
+- Deck composition: 13 rank counts + 4 suit counts = 17 features
+- Existing: 119 features → total ~206
+
+### Ranking Logic
+**Plays:** sort all C(8,k) combinations by chip×mult (Lua calculates base score)
+**Discards:** rank by expected hand improvement given remaining deck
+  - Simple version (no deck obs): keep cards that maximize current best hand, discard rest
+  - Full version (with deck obs): factor in probability of drawing into target hand type
+
+### Decision Flow (mirrors human 3-step logic)
+1. What is the best hand I can play right now? → play options [0-9]
+2. Does playing sacrifice future value given what I have left to draw? → needs deck obs
+3. If not worth playing, what to discard to maximize next draw? → discard options [10-19]
+
+### Curriculum Learning via Action Masking
+Keep Discrete(20) throughout training. Use SB3 action masking to control effective action space:
+- Early training: all 20 options unmasked (full guidance)
+- Fine-tuning: progressively mask lower-ranked options (top 3 plays + top 3 discards)
+- Masking sets invalid actions to -inf logit — agent never picks them
+- Same weights throughout, no architecture change needed
+- Avoids the "shrink action space" problem (would require retraining output layer)
+
+### Why This Enables New Strategies
+- One-shot blind strategy: agent sees chip×mult for best hand → can learn to hold discards
+  for a single high-value play rather than burning through hands
+- Money joker discovery: with economic obs visible, agent can learn "play weak hands for gold
+  now → buy better joker → shift to one-shot strategy"
+- Flush/straight planning: deck composition + discard options let agent build toward target hand
+
+### Performance Impact
+- Lua enumeration of ~218 combinations: <1ms, negligible at 32x speed
+- Obs size increase ~73%: minor, MLP handles this fine
+- Requires fresh training start (obs + action space both change)
+
+### Comparison to Current Model
+| | V1 (current) | V2 |
+|---|---|---|
+| Action space | MultiBinary(9) = 512 combos | Discrete(20) |
+| Obs features | 119 | ~206 |
+| Hand scoring | agent guesses | Lua pre-computes |
+| Deck awareness | none | rank+suit counts |
+| Discard strategy | blind | ranked by draw potential |
+| Expected win rate | ~0% | unknown, target >5% |
+
+## V3 Architecture Plan
+
+### Overview
+V2 playing agent + new dedicated shop agent. Playing agent unchanged from V2 unless training reveals new additions. Shop agent replaces Lua heuristic with a learned policy.
+
+### V3 Shop Agent Obs
+```
+money                    — current dollars
+interest_threshold       — how close to next $1 interest bracket
+jokers[3] × features    — rarity, edition, category (scoring/economy/deck-fixing)
+ante                     — current ante (1-8)
+blind_type              — Small/Big/Boss
+upcoming_boss           — which boss blind is next (huge: some punish specific hand types)
+                           e.g. The Arm degrades hand levels, Violet Vessel needs huge mult
+skip_tags[3]            — available tag rewards for skipping (free joker tag = don't spend)
+hand_levels[12]         — which hand types have been leveled up
+hands_remaining         — hands left this blind
+shop_jokers[2]          — what's currently in shop (rarity, edition, category, cost)
+reroll_cost             — current reroll price
+```
+
+### Communication Between Agents (Simple Version — recommended first)
+Bidirectional structured obs features — no learned encoding:
+```
+Playing agent → shop agent:  hand_level_distribution (12d) — what hands have been working
+Shop agent → playing agent:  joker_category_counts (3d)    — scoring/economy/deck jokers held
+```
+- Human-designed signals, easy to interpret, trains fast
+- Playing agent knows its loadout changed after shop without rediscovering by trial and error
+- Gets ~80% of the benefit at 20% of the complexity
+
+### Communication Between Agents (Complex Version — research-level)
+Fully bidirectional learned latent vectors:
+```
+Playing agent hidden state → strategy_out (16d) → Shop agent obs
+Shop agent hidden state    → loadout_out  (16d) → Playing agent obs
+```
+- `strategy_out`: "I've been landing flushes, I need flush support"
+- `loadout_out`:  "I just bought Fibonacci + Scary Face, lean into high cards"
+- Playing agent wakes up post-shop knowing its loadout changed, shifts hand selection immediately
+- No hand-engineering — what to communicate emerges from joint training
+- Gradients flow through both agents simultaneously with shared reward
+- Classic chicken-and-egg convergence problem: neither vector is useful until the other agent
+  learns to use it — why this needs parallel envs and millions of episodes to converge
+
+### Compute Requirements
+| Version | Networks | Episodes to plateau | Parallel envs needed |
+|---|---|---|---|
+| V2 | 1 | ~50-100k | 1 |
+| V3 simple | 2 separate | ~200k | 1-2 |
+| V3 learned comm | 2 + shared encoder | millions | 4-8 minimum |
+
+V3 learned comm requires WSL2 + Xvfb running 4-8 headless Balatro instances simultaneously. Parallel training near-mandatory. Genuinely research-level — emergent communication between agents is an active RL research area and notoriously slow to converge.
+
+### Intuition: The Callout Analogy
+The two levels of the communication system map cleanly to competitive gaming:
+
+**Encoder weights = the callout vocabulary**
+What each callout implies — "short" means peek around the corner, hold an angle, expect a push.
+This is learned across millions of games and stays fixed once trained.
+It's the shared language, not the content.
+
+**16 floats each game = the actual callouts in real time**
+"Short, short, he's pushing" — specific information about *this* game, *this* moment.
+Resets to zero each new run and fills in dynamically as the game progresses.
+
+**Early training = two players who just met**
+One says "short" and the other doesn't know if it means peek, rotate, or flash.
+The vectors carry noise, agents largely ignore them, both act on local obs only.
+
+**Late training = experienced duo**
+Playing agent has been landing flushes all run → produces a vector the shop agent has learned
+means "flush build, buy flush support" → shop agent buys Smeared Joker → playing agent
+picks up post-shop, vector says "flush support acquired" → holds suited cards more aggressively.
+The specific strategy varies every game but the language for communicating it is shared.
+
+**Why parallel envs matter**
+Two players getting one game a day together vs eight games a day — the shared language
+develops orders of magnitude faster with more reps. Same reason v3 needs 4-8 parallel
+Balatro instances: enough games per gradient update to force the vocabulary to converge.
+
+The reward signal is what drives vocabulary development — coordinated plays produce wins,
+ignored communication doesn't. The encoding that emerges is whatever happened to be most
+useful for winning. You don't design the language, you create conditions for it to develop.
+
+### Recommendation
+Implement V3 simple first. Only pursue learned comm if simple version plateaus and a meaningful performance gap remains.
+
+## Training Milestones
+
+### Checkpoint: Shop Heuristic Upgrade (2026-03-19 ~19:00 MDT)
+- **Log index**: 7806 (after bad-ep removal) + new episodes since = ~9389 per training plot
+- **Actual log entry at restart**: ep=115, ts=155960, reward=0.917 (training had restarted, log index ~9389 on plot)
+- **Changes introduced at this point**:
+  - Sell-upgrade: swap weakest held joker for strictly higher effective_value shop joker
+  - Edition scoring: Poly+10, Holo+5, Foil+3 added to rarity�10 base score
+  - Negative protection: never sell Negative jokers under any circumstances
+  - Reroll: one reroll per shop when cash > 2� reroll_cost and no jokers in shop
+  - WON watchdog removed (was causing ante double-increment on The Hook)
+  - Ante guard self-recovery: Lua fires start_run when rr_ante > win_ante
+- **Goal**: compare ante 2+ rate and avg reward in next 5-10k episodes vs baseline
+
+### Exploration Note
+- Epsilon-greedy wrapper considered but probably not worth implementing
+- PPO entropy bonus already handles exploration implicitly
+- Adding a passive exploration slot to the action array does nothing useful � agent never picks it if policy thinks it's suboptimal
+- If policy collapse becomes an issue, simplest fix is keeping entropy_coef higher for longer rather than adding explicit epsilon-greedy

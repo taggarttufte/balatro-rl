@@ -159,20 +159,82 @@ The key challenge is that Balatro's game engine is event-driven and runs at vari
 
 ## Future Plans
 
-### Near-term improvements
-- **Deck composition in obs** — add remaining rank counts (13) + suit counts (4) = 17 new features so the agent can reason about flush/straight odds and avoid fishing for already-played ranks
-- **Score simulation** — have Lua calculate predicted chip×mult for each candidate hand selection and include it in `state.json`; collapses most card-selection decisions into a lookup and dramatically simplifies the learning problem
-- **Joker-aware obs** — tag each joker as scoring / deck-fixing / economy + rarity (Common/Uncommon/Rare/Legendary); add temporal reward shaping bonuses for buying economy jokers early (antes 1-2) when their compounding value is highest
-- **Shop heuristics** — smarter buying logic: prioritize jokers that synergize with current hand type, skip jokers that conflict with deck composition, consider remaining antes when valuing economy vs. scoring jokers
+### V2 — Richer Obs + Pre-ranked Action Space (next major version)
+
+The current model selects cards by setting 9 binary bits, with no knowledge of what score each combination produces or what cards remain in the deck. V2 addresses both.
+
+**Action space: `Discrete(20)`** — replaces `MultiBinary(9)`
+- `[0–9]` — play one of the top 10 pre-ranked hands (sorted by chip×mult, computed by Lua)
+- `[10–19]` — discard one of the top 10 pre-ranked card subsets (sorted by draw potential)
+- Lua enumerates all ~218 card combinations each step and returns the best options; <1ms overhead
+
+**Obs additions (~206 total features, up from 119):**
+- 10 play options × (chips, mult, hand_type, num_cards) = +40
+- 10 discard options × (expected score delta, target hand type) = +30
+- Deck composition: 13 rank counts + 4 suit counts = +17
+
+**Why this matters:** The agent goes from guessing which 9 bits produce a good hand to choosing from a ranked menu of options. This directly encodes the 3-step human decision loop:
+1. What is the best hand I can play right now?
+2. Does playing it sacrifice future value given what's left in the deck?
+3. If not worth playing — what to discard to maximise my next draw?
+
+**Curriculum learning via action masking:** Start training with all 20 options unmasked. As the policy converges, progressively mask lower-ranked options to focus fine-tuning on near-optimal decisions. Same network weights throughout — no architecture change needed.
+
+---
+
+### V3 — Dedicated Shop Agent with Bidirectional Communication
+
+V2 keeps a hand-coded Lua shop heuristic. V3 replaces it with a learned shop policy that communicates with the playing agent.
+
+**Two specialised agents:**
+
+*Playing agent* — same architecture as V2, handles SELECTING_HAND phase.
+
+*Shop agent* — new, handles SHOP phase. Observes:
+- Money + interest threshold (how close to next $1 bracket)
+- Current joker loadout (rarity, edition, category)
+- Ante, round, and upcoming boss blind type
+- Available skip tags (e.g. free joker tag = don't spend, save for reward)
+- Hand level distribution and scoring history
+- Shop contents: joker type, cost, rarity, edition
+
+**Bidirectional communication channel:**
+
+The two agents pass latent vectors to each other across phases:
+
+```
+Playing agent hidden state → strategy_out (16d) → Shop agent obs
+Shop agent hidden state    → loadout_out  (16d) → Playing agent obs
+```
+
+`strategy_out` encodes what the playing agent has learned this run — which hands are landing, what the deck is trending toward. The shop agent uses this to decide what to buy.
+
+`loadout_out` encodes what the shop agent just acquired — which joker categories and synergies are now available. The playing agent uses this to adjust its hand selection and discard strategy immediately after the shop.
+
+**The callout analogy:**
+Think of the two agents as teammates developing a shared vocabulary. The 16-float vectors are the callouts being made in real time — different content every game. The encoder weights are the shared language that gives those callouts meaning — learned across millions of games and fixed once trained.
+
+Early in training the vectors are noise and agents ignore them, acting only on local observations. Over time the reward signal forces a shared vocabulary to emerge: coordinated plays produce wins, ignored communication doesn't. The language that develops is whatever encoding happened to be most useful for winning — you don't design it, you create conditions for it to develop.
+
+*Simple version (recommended first):* replace learned latent vectors with human-designed structured signals — hand level distribution passed to the shop agent, joker category counts passed back to the playing agent. Same information, trains much faster.
+
+*Complex version:* fully learned bidirectional latent vectors. Requires joint gradient updates through both networks, 4–8 parallel Balatro instances (WSL2/Xvfb), and millions of episodes to converge. Genuinely research-level.
+
+---
+
+### Near-term improvements (V1.x, no architecture change)
+- **Deck composition in obs** — remaining rank/suit counts (+17 features); enables flush/straight planning without a full architecture restart
+- **Joker-aware obs** — tag each joker as scoring / deck-fixing / economy; rarity and edition already partially encoded
+- **Shop sell-upgrade** — sell weakest held joker for a strictly higher-rarity shop joker; edition scoring (Poly > Holo > Foil) and Negative joker protection already implemented
 
 ### Training speedup
-- **Speed mode** — override `love.draw = function() end`, zero all event delays, remove FPS cap; estimated 20-50x additional speedup on top of the current 32x, all within the existing single-instance setup
-- **Parallel training via WSL2/Xvfb** — run multiple headless Balatro instances in Docker containers with virtual displays; most practical path to parallel environments without rewriting the game engine; enables vectorized SB3 environments
-- **Lua scoring engine reimplementation** — reimplement Balatro's ~1,000-line scoring engine in pure Python/Lua outside the game loop; enables thousands of episodes per minute with no game window required; estimated ~1 month of work
+- **Speed mode** — override `love.draw = function() end`, zero all event delays, remove FPS cap; estimated 20–50× additional speedup on top of the current 32×
+- **Parallel training via WSL2/Xvfb** — headless Balatro instances in virtual displays; most practical path to vectorised environments; mandatory for V3 learned communication
+- **Lua scoring engine reimplementation** — reimplement Balatro's ~1,000-line scoring engine outside the game loop; thousands of episodes per minute with no game window
 
 ### Learning approaches
-- **Imitation learning** — behavioral cloning from recorded high-level Balatro gameplay; main bottleneck is video-to-state extraction (mapping screen pixels to game state); would give the agent a strong starting policy before RL fine-tuning
-- **Recurrent policy (LSTM)** — switch from MlpPolicy to RecurrentPPO (SB3-contrib); gives the agent memory across rounds so it can track which cards have been played and reason about deck state over time without needing explicit deck features in obs
+- **Imitation learning** — behavioural cloning from recorded high-level gameplay; strong starting policy before RL fine-tuning; bottleneck is video-to-state extraction
+- **Recurrent policy (LSTM)** — RecurrentPPO (SB3-contrib); agent memory across rounds for implicit deck tracking without explicit deck features
 
 ## Limitations
 
