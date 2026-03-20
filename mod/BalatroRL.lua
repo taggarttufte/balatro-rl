@@ -321,7 +321,20 @@ Game.update = function(self, dt)
             BalatroRL.write("blind_select")
         else
         local bod = G.GAME and G.GAME.blind_on_deck
-        if bod and not BalatroRL._blind_fired then
+        -- Skip The Hook boss blind — its discard mechanic causes game crashes at high antes.
+        -- Treat as terminal and start a new run. PoC exclusion, document as known limitation.
+        local rr_choices = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices
+        local boss_key   = rr_choices and rr_choices["Boss"]
+        if bod == "Boss" and boss_key == "bl_hook" and not BalatroRL._hook_skip_fired then
+            BalatroRL._hook_skip_fired = true
+            love.filesystem.append(LOG_FILE, os.time() .. " SKIP: The Hook detected — forcing new_run\n")
+            G.E_MANAGER:add_event(Event({
+                trigger = "after",
+                delay   = 0.5,
+                func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
+            }))
+        end
+        if bod and not BalatroRL._blind_fired and boss_key ~= "bl_hook" then
             BalatroRL._blind_fired   = true
             BalatroRL._blind_fire_at = love.timer.getTime() + 0.5
         end
@@ -374,6 +387,7 @@ Game.update = function(self, dt)
         BalatroRL._blind_fire_at       = nil
         BalatroRL._blind_select_logged = false
         BalatroRL._ante_guard_fired    = false
+        BalatroRL._hook_skip_fired     = false
     end
     -- Lua cash out: fires 2s after entering ROUND_EVAL
     if BalatroRL.cfg().lua_nav and G.STATE == G.STATES.ROUND_EVAL then
