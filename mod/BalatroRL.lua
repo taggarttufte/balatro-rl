@@ -586,12 +586,19 @@ Game.update = function(self, dt)
             if chips >= target then
                 -- WON: force ROUND_EVAL, but first manually advance blind_on_deck so the
                 -- next BLIND_SELECT shows the correct blind (not the same Boss again).
+                -- For The Hook: add a 1.5s delay to let its pending card-discard E_MANAGER
+                -- events clear before forcing ROUND_EVAL (avoids nil card access crash).
+                local rr_choices_w = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices
+                local is_hook = (rr_choices_w and rr_choices_w["Boss"] == "bl_hook" and bod == "Boss")
+                local won_delay = is_hook and 1.5 or 0.0
                 love.filesystem.append(LOG_FILE, os.time()
                     .. " watchdog: WON stuck chips=" .. tostring(chips)
                     .. " target=" .. tostring(target)
-                    .. " bod=" .. tostring(bod) .. " — advancing blind + ROUND_EVAL\n")
+                    .. " bod=" .. tostring(bod)
+                    .. (is_hook and " [HOOK delay=1.5s]" or "") .. " — advancing blind + ROUND_EVAL\n")
                 G.E_MANAGER:add_event(Event({
-                    trigger = "immediate",
+                    trigger = won_delay > 0 and "after" or "immediate",
+                    delay   = won_delay,
                     func = function()
                         -- Mark current blind defeated
                         if rr and rr.blind_states and bod then
