@@ -556,28 +556,69 @@ Game.update = function(self, dt)
         BalatroRL._gameover_fire_at = nil
     end
 
-    -- Stuck-state watchdog: LOST only (0 hands left, score < target, stuck in SELECTING_HAND).
-    -- discards_left intentionally NOT checked: The Hook boss discards cards from hand at
-    -- the start of each play (not counted as player discards), so discards_left stays > 0
-    -- even when the run is unwinnable. With 0 hands left, remaining discards are irrelevant.
-    -- WON case intentionally removed: forcing ROUND_EVAL skips blind_on_deck update → ante bug.
+    -- Stuck-state watchdog: SELECTING_HAND with 0 hands left, game didn't auto-transition.
+    -- discards_left NOT checked: The Hook discards from hand (not player discards), so
+    -- discards_left stays > 0 even when unwinnable with 0 hands left.
     if G.STATE == G.STATES.SELECTING_HAND
        and G.GAME and G.GAME.current_round
        and G.GAME.current_round.hands_left <= 0
-       and G.GAME.chips and G.GAME.blind
-       and G.GAME.chips < G.GAME.blind.chips then
+       and G.GAME.chips and G.GAME.blind then
         if not BalatroRL._stuck_fired then
             BalatroRL._stuck_fired = true
             local chips  = G.GAME.chips
             local target = G.GAME.blind.chips
-            love.filesystem.append(LOG_FILE, os.time()
-                .. " watchdog: LOST stuck — forcing new_run chips=" .. tostring(chips)
-                .. " target=" .. tostring(target) .. "\n")
-            G.E_MANAGER:add_event(Event({
-                trigger = "after",
-                delay   = 0.5,
-                func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
-            }))
+            local bod    = G.GAME.blind_on_deck
+            local rr     = G.GAME.round_resets
+            if chips >= target then
+                -- WON: force ROUND_EVAL, but first manually advance blind_on_deck so the
+                -- next BLIND_SELECT shows the correct blind (not the same Boss again).
+                love.filesystem.append(LOG_FILE, os.time()
+                    .. " watchdog: WON stuck chips=" .. tostring(chips)
+                    .. " target=" .. tostring(target)
+                    .. " bod=" .. tostring(bod) .. " — advancing blind + ROUND_EVAL\n")
+                G.E_MANAGER:add_event(Event({
+                    trigger = "immediate",
+                    func = function()
+                        -- Mark current blind defeated
+                        if rr and rr.blind_states and bod then
+                            rr.blind_states[bod] = "Defeated"
+                        end
+                        -- Advance blind_on_deck to the next blind
+                        if bod == "Small" then
+                            G.GAME.blind_on_deck = "Big"
+                        elseif bod == "Big" then
+                            G.GAME.blind_on_deck = "Boss"
+                        elseif bod == "Boss" then
+                            G.GAME.blind_on_deck = "Small"
+                            -- Increment ante and reset blind states for new ante
+                            if rr then
+                                rr.ante = (rr.ante or 1) + 1
+                                if rr.blind_states then
+                                    rr.blind_states["Small"] = "Unplayed"
+                                    rr.blind_states["Big"]   = "Unplayed"
+                                    rr.blind_states["Boss"]  = "Unplayed"
+                                end
+                            end
+                        end
+                        love.filesystem.append(LOG_FILE, os.time()
+                            .. " watchdog: blind advanced to " .. tostring(G.GAME.blind_on_deck)
+                            .. " rr_ante=" .. tostring(rr and rr.ante or "?") .. "\n")
+                        G.STATE          = G.STATES.ROUND_EVAL
+                        G.STATE_COMPLETE = false
+                        return true
+                    end
+                }))
+            else
+                -- LOST: force new run
+                love.filesystem.append(LOG_FILE, os.time()
+                    .. " watchdog: LOST stuck — forcing new_run chips=" .. tostring(chips)
+                    .. " target=" .. tostring(target) .. "\n")
+                G.E_MANAGER:add_event(Event({
+                    trigger = "after",
+                    delay   = 0.5,
+                    func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
+                }))
+            end
         end
     elseif G.STATE ~= G.STATES.SELECTING_HAND then
         BalatroRL._stuck_fired = false
