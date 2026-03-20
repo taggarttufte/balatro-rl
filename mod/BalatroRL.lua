@@ -327,12 +327,14 @@ Game.update = function(self, dt)
         local boss_key   = rr_choices and rr_choices["Boss"]
         if bod == "Boss" and boss_key == "bl_hook" and not BalatroRL._hook_skip_fired then
             BalatroRL._hook_skip_fired = true
-            love.filesystem.append(LOG_FILE, os.time() .. " SKIP: The Hook detected — forcing new_run\n")
+            love.filesystem.append(LOG_FILE, os.time() .. " [HOOK] BLIND_SELECT: The Hook detected — SKIP fired, forcing new_run\n")
             G.E_MANAGER:add_event(Event({
                 trigger = "after",
                 delay   = 0.5,
                 func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
             }))
+        elseif bod == "Boss" and boss_key == "bl_hook" then
+            love.filesystem.append(LOG_FILE, os.time() .. " [HOOK] BLIND_SELECT: The Hook detected — skip already fired\n")
         end
         if bod and not BalatroRL._blind_fired and boss_key ~= "bl_hook" then
             BalatroRL._blind_fired   = true
