@@ -556,15 +556,14 @@ Game.update = function(self, dt)
         BalatroRL._gameover_fire_at = nil
     end
 
-    -- Stuck-state watchdog: LOST only (0h/0d, score < target, stuck in SELECTING_HAND).
-    -- WON case intentionally removed: forcing ROUND_EVAL directly skips the game's
-    -- blind-completion events that update blind_on_deck, causing the same Boss blind
-    -- to be selected again and ante to double-increment each time.
-    -- When the agent wins, Balatro transitions to ROUND_EVAL naturally — just wait.
+    -- Stuck-state watchdog: LOST only (0 hands left, score < target, stuck in SELECTING_HAND).
+    -- discards_left intentionally NOT checked: The Hook boss discards cards from hand at
+    -- the start of each play (not counted as player discards), so discards_left stays > 0
+    -- even when the run is unwinnable. With 0 hands left, remaining discards are irrelevant.
+    -- WON case intentionally removed: forcing ROUND_EVAL skips blind_on_deck update → ante bug.
     if G.STATE == G.STATES.SELECTING_HAND
        and G.GAME and G.GAME.current_round
-       and G.GAME.current_round.hands_left    <= 0
-       and G.GAME.current_round.discards_left <= 0
+       and G.GAME.current_round.hands_left <= 0
        and G.GAME.chips and G.GAME.blind
        and G.GAME.chips < G.GAME.blind.chips then
         if not BalatroRL._stuck_fired then
