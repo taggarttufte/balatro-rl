@@ -291,6 +291,35 @@ Game.update = function(self, dt)
     -- Lua blind select: queue events via E_MANAGER (correct way, not synchronous from update)
     -- Only runs if lua_nav is enabled in mod config
     if BalatroRL.cfg().lua_nav and G.STATE == G.STATES.BLIND_SELECT then
+        -- Log every time we enter BLIND_SELECT so we can trace ante accumulation
+        local rr_ante  = G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante  or "?"
+        local rr_round = G.GAME and G.GAME.round_resets and G.GAME.round_resets.round or "?"
+        local win_ante = G.GAME and G.GAME.win_ante or "?"
+        local bod_log  = G.GAME and G.GAME.blind_on_deck or "?"
+        if not BalatroRL._blind_select_logged then
+            BalatroRL._blind_select_logged = true
+            love.filesystem.append(LOG_FILE, os.time()
+                .. " BLIND_SELECT entered: rr_ante=" .. tostring(rr_ante)
+                .. " rr_round=" .. tostring(rr_round)
+                .. " win_ante=" .. tostring(win_ante)
+                .. " bod=" .. tostring(bod_log) .. "\n")
+        end
+        -- Guard: don't auto-navigate past win_ante (use G.GAME.win_ante, not hardcoded 8)
+        local win_ante_n = (type(win_ante) == "number") and win_ante or 8
+        if type(rr_ante) == "number" and rr_ante > win_ante_n then
+            if not BalatroRL._ante_guard_fired then
+                BalatroRL._ante_guard_fired = true
+                love.filesystem.append(LOG_FILE, os.time()
+                    .. " GUARD: ante " .. tostring(rr_ante) .. " > win_ante " .. tostring(win_ante_n)
+                    .. " — forcing new run\n")
+                G.E_MANAGER:add_event(Event({
+                    trigger = "after",
+                    delay   = 0.5,
+                    func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
+                }))
+            end
+            BalatroRL.write("blind_select")
+        else
         local bod = G.GAME and G.GAME.blind_on_deck
         if bod and not BalatroRL._blind_fired then
             BalatroRL._blind_fired   = true
@@ -315,7 +344,9 @@ Game.update = function(self, dt)
                 G.E_MANAGER:add_event(Event({
                     trigger = "immediate",
                     func = function()
-                        ease_round(1)
+                        -- ease_round(1) intentionally omitted: it's a UI counter that
+                        -- accumulates across runs without resetting, causing display corruption.
+                        -- new_round() handles the actual round state correctly.
                         pcall(inc_career_stat, "c_rounds", 1)
                         rr.blind_tag   = nil
                         rr.blind       = blind_obj
@@ -332,13 +363,17 @@ Game.update = function(self, dt)
                 }))
             end)
             love.filesystem.append(LOG_FILE, os.time() ..
-                (ok and " lua_nav: select_blind queued bod=" .. tostring(bod) .. "\n"
+                (ok and " lua_nav: select_blind queued bod=" .. tostring(bod)
+                        .. " ante=" .. tostring(rr.ante) .. "\n"
                     or  " lua_nav: queue err: " .. tostring(err) .. "\n"))
             BalatroRL.write("blind_select_done")
         end
+        end  -- close ante guard else block
     else
-        BalatroRL._blind_fired   = false
-        BalatroRL._blind_fire_at = nil
+        BalatroRL._blind_fired         = false
+        BalatroRL._blind_fire_at       = nil
+        BalatroRL._blind_select_logged = false
+        BalatroRL._ante_guard_fired    = false
     end
     -- Lua cash out: fires 2s after entering ROUND_EVAL
     if BalatroRL.cfg().lua_nav and G.STATE == G.STATES.ROUND_EVAL then
@@ -348,9 +383,11 @@ Game.update = function(self, dt)
         end
         if BalatroRL._cashout_fire_at and love.timer.getTime() >= BalatroRL._cashout_fire_at then
             BalatroRL._cashout_fire_at = nil
+            local ca_ante = G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante or "?"
             local ok, err = pcall(G.FUNCS.cash_out, {config = {button = "cash_out"}})
             love.filesystem.append(LOG_FILE, os.time() ..
-                (ok and " lua_nav: cash_out OK\n" or " lua_nav: cash_out err: " .. tostring(err) .. "\n"))
+                (ok and " lua_nav: cash_out OK ante=" .. tostring(ca_ante) .. "\n"
+                    or  " lua_nav: cash_out err: " .. tostring(err) .. "\n"))
         end
     else
         BalatroRL._cashout_fired   = false
@@ -365,6 +402,21 @@ Game.update = function(self, dt)
             BalatroRL._shop_leave_at = nil
             BalatroRL._shop_bought  = false
         end
+        -- Helper: effective value of a joker card (rarity + edition bonus)
+        -- Negative jokers are flagged unsellable (returns nil)
+        local function joker_value(card)
+            if not (card.ability and card.ability.set == "Joker") then return nil end
+            local ed = card.edition or {}
+            if ed.negative then return nil end   -- never sell Negative jokers
+            local rarity = (card.config and card.config.center and card.config.center.rarity) or 1
+            local bonus  = 0
+            if     ed.polychrome then bonus = 10
+            elseif ed.holo       then bonus = 5
+            elseif ed.foil       then bonus = 3
+            end
+            return rarity * 10 + bonus
+        end
+
         -- Phase 1: buy as many affordable jokers as possible without going over limit/budget
         if BalatroRL._shop_buy_at and love.timer.getTime() >= BalatroRL._shop_buy_at then
             BalatroRL._shop_buy_at = nil
@@ -390,6 +442,78 @@ Game.update = function(self, dt)
                                  .. " remaining=$" .. remaining
                                  .. " slots=" .. slots_used .. "/" .. slots_max .. "\n"
                                or  " lua_nav: buy err: " .. tostring(err) .. "\n"))
+                    end
+                end
+
+                -- Phase 1b: sell-upgrade — if slots full, try to swap a weak joker for a better shop joker
+                slots_used = #G.jokers.cards  -- re-read after buys
+                if slots_used >= slots_max and G.shop_jokers.cards then
+                    -- Find weakest sellable held joker (lowest value, skip Negatives)
+                    local sell_card  = nil
+                    local sell_value = nil
+                    local sell_score = math.huge
+                    for _, held in ipairs(G.jokers.cards or {}) do
+                        local sc = joker_value(held)
+                        if sc and sc < sell_score then
+                            sell_score = sc
+                            sell_card  = held
+                            sell_value = held.sell_cost or 0
+                        end
+                    end
+                    -- Find best shop joker that is a strict upgrade and affordable after sell
+                    if sell_card then
+                        local best_shop = nil
+                        local best_sc   = sell_score   -- must beat held joker's score
+                        for _, scard in ipairs(G.shop_jokers.cards or {}) do
+                            local sc   = joker_value(scard)
+                            local cost = scard.cost or 0
+                            if sc and sc > best_sc
+                               and (remaining + sell_value) >= cost then
+                                best_sc   = sc
+                                best_shop = scard
+                            end
+                        end
+                        if best_shop then
+                            -- Sell the weak joker, then buy the upgrade
+                            local sell_ok = pcall(G.FUNCS.sell_card,
+                                {config = {ref_table = sell_card, selling = true}})
+                            if sell_ok then
+                                remaining  = remaining + sell_value
+                                slots_used = slots_used - 1
+                                local buy_ok = pcall(G.FUNCS.buy_from_shop,
+                                    {config = {ref_table = best_shop, id = "buy"}})
+                                if buy_ok then
+                                    remaining  = remaining  - (best_shop.cost or 0)
+                                    slots_used = slots_used + 1
+                                end
+                                love.filesystem.append(LOG_FILE, os.time()
+                                    .. " lua_nav: sell-upgrade sold_score=" .. tostring(sell_score)
+                                    .. " bought_score=" .. tostring(best_sc)
+                                    .. " sell_val=$" .. tostring(sell_value)
+                                    .. " buy_cost=$" .. tostring(best_shop.cost or 0)
+                                    .. (buy_ok and " OK\n" or " BUY_FAILED\n"))
+                            end
+                        end
+                    end
+                end
+
+                -- Phase 1c: reroll once if nothing useful and cash allows
+                local reroll_cost = (G.GAME.current_round and G.GAME.current_round.reroll_cost) or 5
+                local bought_anything = slots_used > (#G.jokers.cards)  -- slots changed = bought something
+                if remaining > reroll_cost * 2 then
+                    -- Check if any shop joker is useful (affordable or would be after one sell)
+                    local has_useful = false
+                    for _, scard in ipairs(G.shop_jokers.cards or {}) do
+                        if scard.ability and scard.ability.set == "Joker" then
+                            has_useful = true; break
+                        end
+                    end
+                    if not has_useful then
+                        local rok = pcall(G.FUNCS.reroll_shop, {config = {}})
+                        love.filesystem.append(LOG_FILE, os.time()
+                            .. " lua_nav: reroll cost=$" .. tostring(reroll_cost)
+                            .. " remaining=$" .. tostring(remaining)
+                            .. (rok and " OK\n" or " FAILED\n"))
                     end
                 end
             end
@@ -421,36 +545,43 @@ Game.update = function(self, dt)
         end
         if BalatroRL._gameover_fire_at and love.timer.getTime() >= BalatroRL._gameover_fire_at then
             BalatroRL._gameover_fire_at = nil
+            local go_ante = G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante or "?"
             local ok, err = pcall(G.FUNCS.start_run, nil, {stake = 1})
             love.filesystem.append(LOG_FILE, os.time() ..
-                (ok and " lua_nav: start_run OK\n" or " lua_nav: start_run err: " .. tostring(err) .. "\n"))
+                (ok and " lua_nav: start_run OK ante_was=" .. tostring(go_ante) .. "\n"
+                    or  " lua_nav: start_run err: " .. tostring(err) .. "\n"))
         end
     else
         BalatroRL._gameover_fired   = false
         BalatroRL._gameover_fire_at = nil
     end
 
-    -- Watchdog: Handy animation skip can swallow the ROUND_EVAL transition.
-    -- If we're stuck in SELECTING_HAND with 0 hands AND score >= target, force it.
+    -- Stuck-state watchdog: LOST only (0h/0d, score < target, stuck in SELECTING_HAND).
+    -- WON case intentionally removed: forcing ROUND_EVAL directly skips the game's
+    -- blind-completion events that update blind_on_deck, causing the same Boss blind
+    -- to be selected again and ante to double-increment each time.
+    -- When the agent wins, Balatro transitions to ROUND_EVAL naturally — just wait.
     if G.STATE == G.STATES.SELECTING_HAND
        and G.GAME and G.GAME.current_round
-       and G.GAME.current_round.hands_left <= 0
+       and G.GAME.current_round.hands_left    <= 0
+       and G.GAME.current_round.discards_left <= 0
        and G.GAME.chips and G.GAME.blind
-       and G.GAME.chips >= G.GAME.blind.chips then
-        if not BalatroRL._round_eval_forced then
-            BalatroRL._round_eval_forced = true
-            love.filesystem.append(LOG_FILE, os.time() .. " watchdog: forcing ROUND_EVAL (chips=" .. tostring(G.GAME.chips) .. " target=" .. tostring(G.GAME.blind.chips) .. ")\n")
+       and G.GAME.chips < G.GAME.blind.chips then
+        if not BalatroRL._stuck_fired then
+            BalatroRL._stuck_fired = true
+            local chips  = G.GAME.chips
+            local target = G.GAME.blind.chips
+            love.filesystem.append(LOG_FILE, os.time()
+                .. " watchdog: LOST stuck — forcing new_run chips=" .. tostring(chips)
+                .. " target=" .. tostring(target) .. "\n")
             G.E_MANAGER:add_event(Event({
-                trigger = "immediate",
-                func = function()
-                    G.STATE = G.STATES.ROUND_EVAL
-                    G.STATE_COMPLETE = false
-                    return true
-                end
+                trigger = "after",
+                delay   = 0.5,
+                func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
             }))
         end
-    else
-        BalatroRL._round_eval_forced = false
+    elseif G.STATE ~= G.STATES.SELECTING_HAND then
+        BalatroRL._stuck_fired = false
     end
 
     -- Keep state.json fresh while waiting for input on nav screens
@@ -478,8 +609,9 @@ Game.update = function(self, dt)
         if action_type == "leave_shop" then
             pcall(G.FUNCS.toggle_shop, {config = {}})
         elseif action_type == "new_run" then
-            -- Python detected stuck state (0h/0d, score unmet) — force new run
-            love.filesystem.append(LOG_FILE, os.time() .. " lua_nav: new_run forced by Python\n")
+            local nr_ante = G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante or "?"
+            love.filesystem.append(LOG_FILE, os.time()
+                .. " lua_nav: new_run forced by Python ante=" .. tostring(nr_ante) .. "\n")
             pcall(G.FUNCS.start_run, nil, {stake = 1})
         else
             execute_action(action_type, card_indices)
