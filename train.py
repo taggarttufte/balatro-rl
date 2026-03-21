@@ -3,16 +3,15 @@ train.py
 PPO training on live Balatro via BalatroEnv.
 
 Usage:
-  python train.py               # train from scratch
+  python train.py               # train from scratch (auto-launches Balatro)
   python train.py --resume      # resume from latest checkpoint
-
-Before running:
-  1. Balatro must be open with BalatroRL mod enabled
-  2. The mod will auto-select blind and start playing automatically
+  python train.py --no-launch   # skip auto-launch (Balatro already open)
 """
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -32,6 +31,14 @@ LOG_DIR        = Path("logs")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 
+# Balatro auto-launch / restart config
+BALATRO_EXE   = Path(os.environ.get(
+    "BALATRO_EXE",
+    r"C:\Program Files (x86)\Steam\steamapps\common\Balatro\Balatro.exe"
+))
+STATE_JSON    = Path(os.environ["APPDATA"]) / "Balatro" / "balatro_rl" / "state.json"
+RESTART_EVERY = 6_000   # steps (~450 episodes); keeps Balatro memory usage in check
+
 PPO_KWARGS = dict(
     policy          = "MlpPolicy",
     learning_rate   = 3e-4,
@@ -50,6 +57,62 @@ PPO_KWARGS = dict(
 )
 
 TOTAL_TIMESTEPS = 100_000
+
+# ── Balatro Process Management ───────────────────────────────────────────────
+
+def _balatro_pid():
+    """Return PID of running Balatro.exe, or None."""
+    r = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq Balatro.exe", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True
+    )
+    for line in r.stdout.splitlines():
+        if "Balatro.exe" in line:
+            try:
+                return int(line.split(",")[1].strip('"'))
+            except (IndexError, ValueError):
+                pass
+    return None
+
+
+def kill_balatro():
+    pid = _balatro_pid()
+    if pid:
+        print(f"[balatro] Killing PID {pid}...")
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        time.sleep(2)
+
+
+def launch_balatro(wait_timeout=40):
+    """Launch Balatro and block until the mod writes a fresh state.json."""
+    if not BALATRO_EXE.exists():
+        print(f"[balatro] Exe not found: {BALATRO_EXE}")
+        print("[balatro] Set BALATRO_EXE env var or use --no-launch")
+        return False
+
+    mtime_before = STATE_JSON.stat().st_mtime if STATE_JSON.exists() else 0
+    print(f"[balatro] Launching {BALATRO_EXE.name}...")
+    subprocess.Popen([str(BALATRO_EXE)])
+
+    deadline = time.time() + wait_timeout
+    while time.time() < deadline:
+        time.sleep(2)
+        if STATE_JSON.exists() and STATE_JSON.stat().st_mtime > mtime_before:
+            print("[balatro] Mod active — starting training\n")
+            return True
+        remaining = int(deadline - time.time())
+        print(f"[balatro] Waiting for mod... ({remaining}s)", end="\r")
+
+    print("\n[balatro] Warning: timed out waiting for mod. Proceeding anyway.")
+    return False
+
+
+def restart_balatro():
+    print("\n[balatro] Restarting to clear memory leak...")
+    kill_balatro()
+    time.sleep(2)
+    launch_balatro()
+
 
 # ── Best-Run Logger ───────────────────────────────────────────────────────────
 
@@ -129,10 +192,19 @@ class BestRunCallback(BaseCallback):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--steps",  type=int, default=TOTAL_TIMESTEPS)
+    parser.add_argument("--resume",    action="store_true")
+    parser.add_argument("--no-launch", action="store_true",
+                        help="Skip auto-launch (Balatro already running)")
+    parser.add_argument("--steps",     type=int, default=TOTAL_TIMESTEPS)
     args = parser.parse_args()
 
+    # ── Launch Balatro ──────────────────────────────────────────────────────
+    if not args.no_launch:
+        kill_balatro()   # clean slate if already open
+        time.sleep(1)
+        launch_balatro()
+
+    # ── Env + Model ─────────────────────────────────────────────────────────
     base_env = BalatroEnv()
     env      = Monitor(base_env, filename=str(LOG_DIR / "monitor"))
 
@@ -144,12 +216,11 @@ def main():
     )
     best_run_cb = BestRunCallback(verbose=1)
 
-    # Sort numerically by step count, skipping 'final' which sorts after digits alphabetically
     def _ckpt_step(p):
         try:
-            return int(p.stem.split("_")[-2])  # balatro_ppo_114352_steps -> 114352
+            return int(p.stem.split("_")[-2])
         except (ValueError, IndexError):
-            return -1  # 'final' and malformed names go first, not last
+            return -1
 
     latest = sorted(CHECKPOINT_DIR.glob("balatro_ppo_*.zip"), key=_ckpt_step)
     if args.resume and latest:
@@ -161,14 +232,30 @@ def main():
         model = PPO(env=env, **PPO_KWARGS)
 
     print(f"\nPolicy network:\n{model.policy}\n")
-    print(f"Training for {args.steps:,} timesteps...")
+    print(f"Training for {args.steps:,} timesteps (restart every {RESTART_EVERY:,} steps)...")
     print("=" * 60)
 
-    model.learn(
-        total_timesteps     = args.steps,
-        callback            = [checkpoint_cb, best_run_cb],
-        reset_num_timesteps = not args.resume,
-    )
+    # ── Chunked training loop with periodic Balatro restarts ────────────────
+    trained       = 0
+    first_chunk   = True
+    while trained < args.steps:
+        chunk = min(RESTART_EVERY, args.steps - trained)
+        model.learn(
+            total_timesteps     = chunk,
+            callback            = [checkpoint_cb, best_run_cb],
+            reset_num_timesteps = (first_chunk and not args.resume),
+        )
+        trained     += chunk
+        first_chunk  = False
+
+        if trained < args.steps:
+            # Save checkpoint before restart so nothing is lost
+            mid_path = str(CHECKPOINT_DIR / f"balatro_ppo_{trained}_steps")
+            model.save(mid_path)
+            print(f"\n[restart] Saved checkpoint: {mid_path}.zip")
+            restart_balatro()
+            # Re-wrap env after restart (env itself persists, just Balatro relaunched)
+            print("[restart] Resuming training...\n")
 
     model.save(str(CHECKPOINT_DIR / "balatro_ppo_final"))
     print("\nTraining complete. Saved to checkpoints/balatro_ppo_final.zip")
