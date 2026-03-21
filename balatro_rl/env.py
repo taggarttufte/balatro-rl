@@ -422,7 +422,8 @@ class BalatroEnv(gym.Env):
             if (gs.hand
                     and gs.event in ("hand_drawn", "selecting_hand")
                     and gs.hands_left > 0
-                    and gs.ante == 1          # must be a true new run (ante always resets to 1)
+                    and gs.ante == 1                    # must be a true new run
+                    and gs.blind_name == "Small Blind"  # must be first blind (not mid-run)
                     and not is_stuck
                     and gs.file_mtime > baseline_mtime):
                 return gs
