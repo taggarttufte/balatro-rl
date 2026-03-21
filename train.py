@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import heapq
 import json
 import os
 import subprocess
@@ -118,72 +119,96 @@ def restart_balatro():
 
 class BestRunCallback(BaseCallback):
     """
-    Tracks every episode. When a new episode-reward record is set,
-    saves seed + action sequence to logs/best_runs.jsonl.
-    Also appends every episode summary to logs/episode_log.jsonl
-    so plot_training.py can visualise progress.
+    Tracks every episode. Logs:
+    - episode_log.jsonl: summary of every episode
+    - best_runs.jsonl: all-time best reward runs (full detail)
+    - run_detail_log.jsonl: full play-by-play for every 10th episode
+    - top_runs_recent.jsonl: top 10 by reward from last 1000 episodes
     """
+    SAMPLE_EVERY   = 10    # log full detail every Nth episode
+    TOP_N          = 10    # keep top N from recent window
+    RECENT_WINDOW  = 1000  # window size for rolling top-N
 
     def __init__(self, verbose=0):
         super().__init__(verbose)
-        self.best_reward    = -np.inf
-        self.episode_count  = 0
-        self._ep_actions    = []   # action taken each step
-        self._ep_reward     = 0.0
-        self._ep_start_step = 0
+        self.best_reward   = -np.inf
+        self.episode_count = 0
+        self._ep_steps     = []   # list of {action, reward, hand_type, jokers}
+        self._ep_reward    = 0.0
+        self._recent_buf   = []   # ring buffer for rolling top-N (list of ep records)
 
-        self.best_log  = LOG_DIR / "best_runs.jsonl"
-        self.ep_log    = LOG_DIR / "episode_log.jsonl"
+        self.best_log   = LOG_DIR / "best_runs.jsonl"
+        self.ep_log     = LOG_DIR / "episode_log.jsonl"
+        self.detail_log = LOG_DIR / "run_detail_log.jsonl"
+        self.top_log    = LOG_DIR / "top_runs_recent.jsonl"
 
     def _on_step(self) -> bool:
-        # Accumulate action and reward for current episode
-        # MultiBinary(9) → actions shape is (n_envs, 9); grab env 0 as a list
-        raw = self.locals["actions"]
+        raw    = self.locals["actions"]
         action = raw[0].tolist() if hasattr(raw, "__len__") else [int(raw)]
         reward = float(self.locals["rewards"][0])
         done   = bool(self.locals["dones"][0])
 
-        self._ep_actions.append(action)
+        # Capture per-step detail from the env
+        env = self.training_env.envs[0].env
+        step_detail = {
+            "action":    action,
+            "reward":    round(reward, 4),
+            "hand_type": getattr(env, "_last_hand_type", "unknown"),
+            "jokers":    getattr(env, "_last_joker_names", []),
+        }
+        self._ep_steps.append(step_detail)
         self._ep_reward += reward
 
         if done:
             self.episode_count += 1
-            ep_len = len(self._ep_actions)
-
-            # Pull metadata from the underlying env
-            env    = self.training_env.envs[0].env  # unwrap Monitor
+            ep_len = len(self._ep_steps)
             seed   = getattr(env, "_last_seed",  "unknown")
             ante   = getattr(env, "_last_ante",  1)
             score  = getattr(env, "_last_score", 0)
 
             ep_record = {
-                "episode":    self.episode_count,
-                "timestep":   self.num_timesteps,
-                "reward":     round(self._ep_reward, 3),
-                "length":     ep_len,
-                "seed":       seed,
-                "ante":       ante,
-                "score":      score,
-                "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "episode":   self.episode_count,
+                "timestep":  self.num_timesteps,
+                "reward":    round(self._ep_reward, 3),
+                "length":    ep_len,
+                "seed":      seed,
+                "ante":      ante,
+                "score":     score,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
 
-            # Log every episode
+            # Always: summary log
             with self.ep_log.open("a") as f:
                 f.write(json.dumps(ep_record) + "\n")
 
-            # Save best run with full action sequence
+            # Every 10th episode: full play-by-play detail
+            if self.episode_count % self.SAMPLE_EVERY == 0:
+                detail_record = {**ep_record, "steps": self._ep_steps}
+                with self.detail_log.open("a") as f:
+                    f.write(json.dumps(detail_record) + "\n")
+
+            # All-time best: full detail
             if self._ep_reward > self.best_reward:
                 self.best_reward = self._ep_reward
-                best_record = {**ep_record, "actions": self._ep_actions}
+                best_record = {**ep_record, "steps": self._ep_steps}
                 with self.best_log.open("a") as f:
                     f.write(json.dumps(best_record) + "\n")
                 print(f"\n★ New best! Episode {self.episode_count} | "
                       f"reward={self._ep_reward:.1f} | ante={ante} | seed={seed}")
 
+            # Rolling top-10 from last 1000
+            self._recent_buf.append({**ep_record, "steps": self._ep_steps})
+            if len(self._recent_buf) > self.RECENT_WINDOW:
+                self._recent_buf.pop(0)
+            top10 = heapq.nlargest(self.TOP_N, self._recent_buf,
+                                   key=lambda r: r["reward"])
+            self.top_log.write_text(
+                "\n".join(json.dumps(r) for r in top10) + "\n"
+            )
+
             # Reset episode state
-            self._ep_actions    = []
-            self._ep_reward     = 0.0
-            self._ep_start_step = self.num_timesteps
+            self._ep_steps  = []
+            self._ep_reward = 0.0
 
         return True
 

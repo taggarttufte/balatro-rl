@@ -121,6 +121,7 @@ class GameState:
     hand_levels: Dict[str, Dict] = field(default_factory=dict)
     shop: List[Dict]             = field(default_factory=list)
     config: Dict                 = field(default_factory=dict)  # mod config flags from Lua
+    last_hand_type: str          = "unknown"
 
     # Derived
     @property
@@ -167,6 +168,14 @@ def parse_joker(raw: dict) -> JokerState:
         is_present = True,
     )
 
+def _safe_float(val, default: float = 0.0) -> float:
+    """Convert val to float, returning default if val is non-numeric (e.g. '?' from The Mark)."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def _parse_hand_levels(raw_hl) -> dict:
     """Normalise hand_levels from either list or dict format into
     a dict keyed by snake_case hand name, e.g. 'high_card', 'flush_five'."""
@@ -192,8 +201,8 @@ def parse_state(raw: dict) -> GameState:
         round         = int(raw.get("round", 0)),
         blind_name    = raw.get("blind_name", "unknown"),
         blind_boss    = bool(raw.get("blind_boss", False)),
-        score_target  = float(raw.get("score_target", 300)),
-        current_score = float(raw.get("current_score", 0)),
+        score_target  = _safe_float(raw.get("score_target", 300)),
+        current_score = _safe_float(raw.get("current_score", 0)),
         hands_left    = int(raw.get("hands_left", 4)),
         discards_left = int(raw.get("discards_left", 4)),
         money         = float(raw.get("money", 0)),
@@ -202,10 +211,11 @@ def parse_state(raw: dict) -> GameState:
         discard_count = int(raw.get("discard_count", 0)),
         hand_levels   = _parse_hand_levels(raw.get("hand_levels", {})),
     )
-    gs.shop   = raw.get("shop", [])
-    gs.config = raw.get("config", {})
-    gs.hand   = [parse_card(c)  for c in raw.get("hand", [])]
-    gs.jokers = [parse_joker(j) for j in raw.get("jokers", [])]
+    gs.shop          = raw.get("shop", [])
+    gs.config        = raw.get("config", {})
+    gs.hand          = [parse_card(c)  for c in raw.get("hand", [])]
+    gs.jokers        = [parse_joker(j) for j in raw.get("jokers", [])]
+    gs.last_hand_type = raw.get("last_hand_type", "unknown")
     return gs
 
 

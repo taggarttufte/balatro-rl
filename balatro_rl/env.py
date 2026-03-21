@@ -117,9 +117,11 @@ class BalatroEnv(gym.Env):
         self._nav_state_at: dict[int, float] = {}   # g_state → wall time first seen
         self._nav_last_g   = -1
         # Metadata exposed for logging callbacks
-        self._last_seed  = "unknown"
-        self._last_ante  = 1
-        self._last_score = 0
+        self._last_seed       = "unknown"
+        self._last_ante       = 1
+        self._last_score      = 0
+        self._last_hand_type  = "unknown"
+        self._last_joker_names = []
         self._consecutive_timeouts = 0
         self._last_live_tick = 0.0   # last tick we saw state.json actually update   # current game state
         self._prev_ante   = 0
@@ -215,9 +217,11 @@ class BalatroEnv(gym.Env):
         info = self._make_info(new_gs)
 
         # Update metadata for logging callbacks
-        self._last_seed  = new_gs.seed
-        self._last_ante  = new_gs.ante
-        self._last_score = int(new_gs.current_score)
+        self._last_seed        = new_gs.seed
+        self._last_ante        = new_gs.ante
+        self._last_score       = int(new_gs.current_score)
+        self._last_hand_type   = new_gs.last_hand_type
+        self._last_joker_names = [j.name for j in new_gs.jokers]
 
         if terminated:
             won = new_gs.ante > 8 or (new_gs.ante == 8 and new_gs.current_score >= new_gs.score_target)

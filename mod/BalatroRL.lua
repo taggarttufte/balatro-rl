@@ -149,6 +149,7 @@ function BalatroRL.capture(event)
         discard_count  = G.discard and #G.discard.cards or 0,
         shop           = {},
         hand_levels    = hand_levels(),
+        last_hand_type = (round.most_played_poker_hand) or "unknown",
     }
     if G.hand and G.hand.cards then
         for _, card in ipairs(G.hand.cards) do
