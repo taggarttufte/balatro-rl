@@ -409,12 +409,31 @@ class BalatroEnv(gym.Env):
         current = read_state(timeout=5.0)
         baseline_mtime = current.file_mtime if current else 0.0
 
+        STALE_SECS = 45.0   # restart Balatro if state.json hasn't updated in this long
+        last_seen_mtime  = baseline_mtime
+        last_mtime_wall  = time.time()
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             gs = read_state(timeout=1.0)
             if gs is None:
                 time.sleep(0.3)
                 continue
+
+            # Track last time state.json was updated; restart Balatro if stale
+            if gs.file_mtime != last_seen_mtime:
+                last_seen_mtime = gs.file_mtime
+                last_mtime_wall = time.time()
+            elif time.time() - last_mtime_wall > STALE_SECS:
+                print(f"\n[BalatroEnv] state.json stale for {STALE_SECS:.0f}s — Balatro crashed. Restarting...")
+                try:
+                    from train import restart_balatro
+                    restart_balatro()
+                except Exception as e:
+                    print(f"[BalatroEnv] Auto-restart failed: {e}. Restart Balatro manually.")
+                last_mtime_wall = time.time()
+                last_seen_mtime = 0.0   # force mtime check to reset
+
             # Accept any playable SELECTING_HAND state written after baseline.
             # Filter out stuck states (0h/0d/score unmet) which look like valid runs.
             is_stuck = (gs.hands_left <= 0 and gs.discards_left <= 0
