@@ -325,9 +325,11 @@ class BalatroEnv(gym.Env):
                 and gs.current_score < gs.score_target
                 and gs.game_state == GS_SELECTING_HAND):
             return True
-        # Lost: out of hands AND score not met AND not in a transition state
-        # Guard against race condition where hands_left=0 briefly mid-scoring
+        # Lost: out of hands AND discards AND score not met
+        # Require discards_left==0 to avoid false positives during blind transitions
+        # where hands_left=0 (old blind) and current_score=0 (new blind) overlap briefly
         if (gs.hands_left <= 0
+                and gs.discards_left <= 0
                 and gs.current_score < gs.score_target
                 and gs.game_state not in (GS_ROUND_EVAL, GS_SHOP, GS_BLIND_SELECT)):
             return True
@@ -397,6 +399,7 @@ class BalatroEnv(gym.Env):
             if (gs.hand
                     and gs.event in ("hand_drawn", "selecting_hand")
                     and gs.hands_left > 0
+                    and gs.ante == 1          # must be a true new run (ante always resets to 1)
                     and not is_stuck
                     and gs.file_mtime > baseline_mtime):
                 return gs
