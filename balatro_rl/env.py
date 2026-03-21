@@ -481,6 +481,13 @@ class BalatroEnv(gym.Env):
                     and gs.current_score < gs.score_target
                     and gs.game_state == GS_SELECTING_HAND):
                 write_nav("new_run")
+            # If game is mid-run (hands > 0) but past Small Blind ante 1 — Python called
+            # reset() while Lua kept playing. Force new run so we don't deadlock.
+            if (gs.hands_left > 0
+                    and gs.game_state == GS_SELECTING_HAND
+                    and not (gs.ante == 1 and gs.blind_name == "Small Blind")):
+                print(f"[BalatroEnv] Mid-run state detected in reset (ante={gs.ante} blind={gs.blind_name}) — forcing new run")
+                write_nav("new_run")
             lua_nav = gs.config.get("lua_nav", True)
             if not lua_nav:
                 self._handle_nav(gs)
