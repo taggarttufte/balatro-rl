@@ -688,7 +688,7 @@ Game.update = function(self, dt)
                 local bl_name  = G.GAME and G.GAME.blind and G.GAME.blind.name or "?"
                 local bl_boss  = G.GAME and G.GAME.blind and G.GAME.blind.boss or false
                 local bl_key   = rr and rr.blind_choices and rr.blind_choices[bod] or "?"
-                local e_count  = G.E_MANAGER and #G.E_MANAGER.queue or "?"
+                local e_count  = (G.E_MANAGER and G.E_MANAGER.queue and #G.E_MANAGER.queue) or "?"
                 love.filesystem.append(LOG_FILE, os.time()
                     .. " watchdog: LOST stuck — forcing new_run chips=" .. tostring(chips)
                     .. " target=" .. tostring(target)
