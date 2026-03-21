@@ -208,14 +208,20 @@ class BalatroEnv(gym.Env):
         # Fast terminal check (game_over event, ante > 8) — no race risk
         if self._is_terminal_fast(new_gs):
             terminated = True
-        # Heuristic: hands+discards exhausted. Debounce 0.65s so the Lua WON watchdog
-        # (0.5s delay) has time to fire and advance the game before we declare terminal.
         elif new_gs.hands_left <= 0 and new_gs.discards_left <= 0:
-            time.sleep(0.65)
-            fresh = read_state(timeout=1.0)
-            if fresh:
-                new_gs = fresh
-            terminated = self._is_terminal(new_gs)
+            if new_gs.current_score < new_gs.score_target:
+                # Genuine loss — terminate immediately.
+                # Don't debounce: Lua LOST watchdog fires start_run at t+0.5s,
+                # and debouncing would let the new run start before we check.
+                terminated = True
+            else:
+                # Score met — WON the blind. Debounce 0.65s so the Lua WON watchdog
+                # (0.5s delay) has time to advance game to ROUND_EVAL/SHOP before we check.
+                time.sleep(0.65)
+                fresh = read_state(timeout=1.0)
+                if fresh:
+                    new_gs = fresh
+                terminated = self._is_terminal(new_gs)
         else:
             terminated = False
         truncated = False
