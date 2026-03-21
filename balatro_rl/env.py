@@ -241,7 +241,14 @@ class BalatroEnv(gym.Env):
             print(f"[term] FAST: event={new_gs.event} ante={new_gs.ante}")
             terminated = True
         elif new_gs.hands_left <= 0 and new_gs.discards_left <= 0:
+            # Re-read after 0.15s: at 32x speed G.GAME.chips may not be finalized
+            # yet when SELECTING_HAND first fires after the last hand scored.
+            time.sleep(0.15)
+            fresh = read_state(timeout=1.0)
+            if fresh:
+                new_gs = fresh
             if new_gs.current_score < new_gs.score_target:
+                # Genuinely lost — terminate immediately.
                 print(f"[term] LOST: h={new_gs.hands_left} d={new_gs.discards_left}"
                       f" score={new_gs.current_score:.0f} target={new_gs.score_target:.0f}"
                       f" blind={new_gs.blind_name} ante={new_gs.ante} gs={new_gs.game_state}")
