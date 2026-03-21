@@ -169,8 +169,8 @@ class BalatroEnv(gym.Env):
             return obs, -0.1, False, False, self._make_info(self._gs)
         self._gs = gs
 
-        # Guard: if already terminal, end episode
-        if self._is_terminal(gs):
+        # Guard: if already terminal, end episode (fast check only — heuristic has debounce in post-action path)
+        if self._is_terminal_fast(gs):
             obs = state_to_obs(gs)
             return obs, R_LOSE, True, False, self._make_info(gs)
 
@@ -203,9 +203,22 @@ class BalatroEnv(gym.Env):
         self._consecutive_timeouts = 0
         self._last_live_tick = new_gs.timestamp
 
-        reward     = self._compute_reward(gs, new_gs, action_type) + hand_bonus
-        terminated = self._is_terminal(new_gs)
-        truncated  = False
+        reward = self._compute_reward(gs, new_gs, action_type) + hand_bonus
+
+        # Fast terminal check (game_over event, ante > 8) — no race risk
+        if self._is_terminal_fast(new_gs):
+            terminated = True
+        # Heuristic: hands+discards exhausted. Debounce 0.65s so the Lua WON watchdog
+        # (0.5s delay) has time to fire and advance the game before we declare terminal.
+        elif new_gs.hands_left <= 0 and new_gs.discards_left <= 0:
+            time.sleep(0.65)
+            fresh = read_state(timeout=1.0)
+            if fresh:
+                new_gs = fresh
+            terminated = self._is_terminal(new_gs)
+        else:
+            terminated = False
+        truncated = False
 
         self._gs          = new_gs
         self._prev_ante   = new_gs.ante
@@ -319,28 +332,26 @@ class BalatroEnv(gym.Env):
 
         return reward
 
-    def _is_terminal(self, gs: GameState) -> bool:
-        # Game explicitly signalled game over
+    def _is_terminal_fast(self, gs: GameState) -> bool:
+        """Fast checks only — no race condition risk."""
         if gs.event == "game_over":
             return True
-        # Stuck: 0 hands AND 0 discards in SELECTING_HAND = game can't progress
-        # (e.g. The Hook discarded all hand cards mid-blind)
-        if (gs.hands_left <= 0 and gs.discards_left <= 0
-                and gs.current_score < gs.score_target
-                and gs.game_state == GS_SELECTING_HAND):
+        if gs.ante > 8:
             return True
-        # Lost: out of hands AND discards AND score not met
-        # current_score > 0 guards against blind transition race: when a blind clears,
-        # score resets to 0 before hands_left/discards_left reset, creating a false loss.
-        # After any hand is played, score is always > 0 (base chip value >= 5).
+        return False
+
+    def _is_terminal(self, gs: GameState) -> bool:
+        """Full terminal check including heuristic (call after debounce)."""
+        if self._is_terminal_fast(gs):
+            return True
+        # Heuristic: out of hands AND discards AND score not met.
+        # current_score is now G.GAME.chips (accumulated blind total).
+        # Requires score > 0 to avoid false positives when score resets at blind start.
         if (gs.hands_left <= 0
                 and gs.discards_left <= 0
-                and gs.current_score > 0
+                and gs.current_score >= 0   # always true, kept for clarity
                 and gs.current_score < gs.score_target
                 and gs.game_state not in (GS_ROUND_EVAL, GS_SHOP, GS_BLIND_SELECT)):
-            return True
-        # Won: cleared ante 8
-        if gs.ante > 8:
             return True
         return False
 

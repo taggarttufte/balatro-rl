@@ -141,7 +141,7 @@ function BalatroRL.capture(event)
         discards_left  = round.discards_left or 0,
         money          = game.dollars        or 0,
         joker_slots    = game.joker_limit    or 5,
-        current_score  = (round.current_hand and round.current_hand.chips) or 0,
+        current_score  = game.chips or 0,   -- accumulated blind chips (G.GAME.chips), resets each blind
         score_target   = blind.chips or 0,
         hand           = {},
         jokers         = {},
