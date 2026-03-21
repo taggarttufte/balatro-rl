@@ -149,7 +149,7 @@ function BalatroRL.capture(event)
         discard_count  = G.discard and #G.discard.cards or 0,
         shop           = {},
         hand_levels    = hand_levels(),
-        last_hand_type = (round.most_played_poker_hand) or "unknown",
+        last_hand_type = (BalatroRL._last_played_hand or round.most_played_poker_hand) or "unknown",
     }
     if G.hand and G.hand.cards then
         for _, card in ipairs(G.hand.cards) do
@@ -201,7 +201,18 @@ local function hook(fn_name, label)
     G.FUNCS[fn_name] = function(e) orig(e); BalatroRL.write(label) end
 end
 
-hook("play_cards_from_highlighted",    "play")
+local _orig_play = G.FUNCS.play_cards_from_highlighted
+if _orig_play then
+    G.FUNCS.play_cards_from_highlighted = function(e)
+        _orig_play(e)
+        -- Capture last played hand type from current_round after scoring
+        local rr = G.GAME and G.GAME.current_round
+        if rr and rr.current_hand and rr.current_hand.hand_name then
+            BalatroRL._last_played_hand = rr.current_hand.hand_name
+        end
+        BalatroRL.write("play")
+    end
+end
 hook("discard_cards_from_highlighted", "discard")
 hook("select_blind",  "blind_selected")
 hook("skip_blind",    "blind_skipped")

@@ -200,8 +200,17 @@ class BalatroEnv(gym.Env):
             return obs, -0.1, False, False, self._make_info(self._gs)
         self._gs = gs
 
+        # Update logging metadata from pre-action state (before any early returns)
+        # so _last_hand_type / _last_joker_names are always current regardless of exit path.
+        self._last_seed        = gs.seed
+        self._last_ante        = gs.ante
+        self._last_score       = int(gs.current_score)
+        self._last_hand_type   = gs.last_hand_type
+        self._last_joker_names = [j.name for j in gs.jokers if j.is_present]
+
         # Guard: if already terminal, end episode (fast check only — heuristic has debounce in post-action path)
         if self._is_terminal_fast(gs):
+            print(f"[term] FAST: event={gs.event} ante={gs.ante}")
             obs = state_to_obs(gs)
             return obs, R_LOSE, True, False, self._make_info(gs)
 
