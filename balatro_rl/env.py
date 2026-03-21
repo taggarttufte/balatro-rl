@@ -225,7 +225,7 @@ class BalatroEnv(gym.Env):
         # G.GAME.chips is not yet finalized — reading chips mid-animation causes
         # false LOST terminal (score looks < target before scoring completes).
         write_action(card_indices, action_type)
-        new_gs = self._wait_for_hand_ready(gs.timestamp, timeout=self.step_timeout)
+        new_gs = self._wait_for_next_hand(gs.timestamp, timeout=self.step_timeout)
 
         if new_gs is None:
             self._consecutive_timeouts += 1
@@ -424,8 +424,8 @@ class BalatroEnv(gym.Env):
 
     def _wait_for_hand_ready(self, old_ts: float, timeout: float) -> GameState | None:
         """
-        Wait for SELECTING_HAND with cards ready.
-        While waiting, automatically handle any nav screens (blind select, cash out, etc.)
+        Pre-action: return current SELECTING_HAND state immediately (or wait briefly).
+        Returns the current state even if tick == old_ts — used to snapshot state before acting.
         """
         HAND_EVENTS = ("selecting_hand", "hand_drawn")
         deadline = time.time() + timeout
@@ -434,14 +434,38 @@ class BalatroEnv(gym.Env):
             if gs is None:
                 time.sleep(0.1)
                 continue
-            if gs.event == "game_over" and gs.timestamp > old_ts:
+            if gs.event == "game_over":
                 return gs
             if gs.hand and gs.event in HAND_EVENTS:
-                if gs.timestamp != old_ts or old_ts == 0:
-                    return gs
-                return gs
-            # Handle nav screens while waiting
+                return gs   # return immediately — pre-action snapshot
             self._handle_nav(gs)
+            time.sleep(0.05)
+        return None
+
+    def _wait_for_next_hand(self, old_ts: float, timeout: float) -> GameState | None:
+        """
+        Post-action: wait for the NEXT actionable state after a play/discard.
+        Requires tick > old_ts (genuinely new state).
+        Skips intermediate states: HAND_PLAYED (gs=2), DRAW_TO_HAND (gs=3),
+        and nav states (SHOP, BLIND_SELECT, ROUND_EVAL) that Lua handles autonomously.
+        Only returns SELECTING_HAND or game_over.
+        """
+        HAND_EVENTS = ("selecting_hand", "hand_drawn")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            gs = read_state(timeout=1.0)
+            if gs is None:
+                time.sleep(0.1)
+                continue
+            if gs.timestamp <= old_ts:
+                time.sleep(0.05)
+                continue
+            # New state (tick advanced)
+            if gs.event == "game_over":
+                return gs
+            if gs.hand and gs.event in HAND_EVENTS:
+                return gs
+            # Skip: HAND_PLAYED, DRAW_TO_HAND, SHOP, BLIND_SELECT, ROUND_EVAL
             time.sleep(0.05)
         return None
 
