@@ -286,6 +286,22 @@ Game.update = function(self, dt)
             os.time().." state "..tostring(prev).."->"..tostring(G.STATE).."\n")
     end
 
+    -- Auto-nav from main menu: fires start_run 2s after MENU loads
+    -- Handles fresh Balatro launches and restarts from train.py
+    if G.STATE == G.STATES.MENU then
+        if not BalatroRL._menu_fire_at then
+            BalatroRL._menu_fire_at = love.timer.getTime() + 2.0
+            love.filesystem.append(LOG_FILE, os.time() .. " lua_nav: MENU detected — will start_run in 2s\n")
+        end
+        if BalatroRL._menu_fire_at and love.timer.getTime() >= BalatroRL._menu_fire_at then
+            BalatroRL._menu_fire_at = nil
+            local ok = pcall(G.FUNCS.start_run, nil, {stake = 1})
+            love.filesystem.append(LOG_FILE, os.time() .. " lua_nav: MENU start_run " .. (ok and "OK" or "FAILED") .. "\n")
+        end
+    else
+        BalatroRL._menu_fire_at = nil
+    end
+
     -- Lua blind select: bypass G.FUNCS.select_blind (needs UIBox we can't easily get)
     -- Instead call new_round() directly after setting state — what select_blind does internally
     -- Lua blind select: queue events via E_MANAGER (correct way, not synchronous from update)
