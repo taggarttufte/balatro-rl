@@ -238,12 +238,13 @@ class BalatroEnv(gym.Env):
 
         # Fast terminal check (game_over event, ante > 8) — no race risk
         if self._is_terminal_fast(new_gs):
+            print(f"[term] FAST: event={new_gs.event} ante={new_gs.ante}")
             terminated = True
         elif new_gs.hands_left <= 0 and new_gs.discards_left <= 0:
             if new_gs.current_score < new_gs.score_target:
-                # Genuine loss — terminate immediately.
-                # Don't debounce: Lua LOST watchdog fires start_run at t+0.5s,
-                # and debouncing would let the new run start before we check.
+                print(f"[term] LOST: h={new_gs.hands_left} d={new_gs.discards_left}"
+                      f" score={new_gs.current_score:.0f} target={new_gs.score_target:.0f}"
+                      f" blind={new_gs.blind_name} ante={new_gs.ante} gs={new_gs.game_state}")
                 terminated = True
             else:
                 # Score met — WON the blind. Debounce 0.65s so the Lua WON watchdog
@@ -252,7 +253,13 @@ class BalatroEnv(gym.Env):
                 fresh = read_state(timeout=1.0)
                 if fresh:
                     new_gs = fresh
-                terminated = self._is_terminal(new_gs)
+                if self._is_terminal(new_gs):
+                    print(f"[term] WON-DEBOUNCE-TERMINAL: event={new_gs.event} ante={new_gs.ante}"
+                          f" gs={new_gs.game_state} h={new_gs.hands_left} d={new_gs.discards_left}"
+                          f" score={new_gs.current_score:.0f} target={new_gs.score_target:.0f}")
+                    terminated = True
+                else:
+                    terminated = False
         else:
             terminated = False
         truncated = False
