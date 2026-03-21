@@ -11,6 +11,8 @@ Reset: waits for the user to start a new run in Balatro.
        Call env.reset() AFTER clicking "New Run" in the game.
 """
 
+import os
+import subprocess
 import time
 import numpy as np
 import gymnasium as gym
@@ -18,6 +20,35 @@ from gymnasium import spaces
 
 from balatro_rl.state  import read_state, state_to_obs, GameState, OBS_SIZE
 from balatro_rl.action import write_action, write_nav, agent_output_to_action, ACTION_FILE
+
+# ── Balatro process management (self-contained, no train.py dependency) ───────
+_BALATRO_EXE = os.environ.get(
+    "BALATRO_EXE",
+    r"C:\Program Files (x86)\Steam\steamapps\common\Balatro\Balatro.exe"
+)
+
+def _balatro_restart():
+    """Kill and relaunch Balatro. Called automatically on stale state.json."""
+    # Kill existing process
+    r = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq Balatro.exe", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True
+    )
+    for line in r.stdout.splitlines():
+        if "Balatro.exe" in line:
+            try:
+                pid = int(line.split(",")[1].strip('"'))
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+                time.sleep(2)
+            except (IndexError, ValueError):
+                pass
+    time.sleep(1)
+    if os.path.exists(_BALATRO_EXE):
+        subprocess.Popen([_BALATRO_EXE])
+        print("[BalatroEnv] Balatro relaunched — waiting for mod to initialize...")
+        time.sleep(5)  # give it a moment; _wait_for_new_run will wait for state.json
+    else:
+        print(f"[BalatroEnv] Balatro exe not found: {_BALATRO_EXE}")
 
 # ── Reward constants ─────────────────────────────────────────────────────────
 R_BLIND_COMPLETE  =  1.0   # finished a single blind
@@ -427,8 +458,7 @@ class BalatroEnv(gym.Env):
             elif time.time() - last_mtime_wall > STALE_SECS:
                 print(f"\n[BalatroEnv] state.json stale for {STALE_SECS:.0f}s — Balatro crashed. Restarting...")
                 try:
-                    from train import restart_balatro
-                    restart_balatro()
+                    _balatro_restart()
                 except Exception as e:
                     print(f"[BalatroEnv] Auto-restart failed: {e}. Restart Balatro manually.")
                 last_mtime_wall = time.time()
