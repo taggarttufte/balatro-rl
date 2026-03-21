@@ -330,10 +330,12 @@ class BalatroEnv(gym.Env):
                 and gs.game_state == GS_SELECTING_HAND):
             return True
         # Lost: out of hands AND discards AND score not met
-        # Require discards_left==0 to avoid false positives during blind transitions
-        # where hands_left=0 (old blind) and current_score=0 (new blind) overlap briefly
+        # current_score > 0 guards against blind transition race: when a blind clears,
+        # score resets to 0 before hands_left/discards_left reset, creating a false loss.
+        # After any hand is played, score is always > 0 (base chip value >= 5).
         if (gs.hands_left <= 0
                 and gs.discards_left <= 0
+                and gs.current_score > 0
                 and gs.current_score < gs.score_target
                 and gs.game_state not in (GS_ROUND_EVAL, GS_SHOP, GS_BLIND_SELECT)):
             return True
