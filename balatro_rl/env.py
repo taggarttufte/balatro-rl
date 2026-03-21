@@ -219,9 +219,13 @@ class BalatroEnv(gym.Env):
             hand_type = _eval_hand(selected_cards)
             hand_bonus = HAND_BONUS.get(hand_type, 0.0)
 
-        # Write action and wait for the game to respond with a NEW state
+        # Write action and wait for the game to return to a hand-ready state.
+        # Use _wait_for_hand_ready (not _wait_for_state_change) so we skip through
+        # HAND_PLAYED (gs=2) and DRAW_TO_HAND (gs=3) intermediate states where
+        # G.GAME.chips is not yet finalized — reading chips mid-animation causes
+        # false LOST terminal (score looks < target before scoring completes).
         write_action(card_indices, action_type)
-        new_gs = self._wait_for_state_change(gs.timestamp, timeout=self.step_timeout)
+        new_gs = self._wait_for_hand_ready(gs.timestamp, timeout=self.step_timeout)
 
         if new_gs is None:
             self._consecutive_timeouts += 1
