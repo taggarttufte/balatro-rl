@@ -285,6 +285,28 @@ Game.update = function(self, dt)
         BalatroRL.write(event_name)
         love.filesystem.append(LOG_FILE,
             os.time().." state "..tostring(prev).."->"..tostring(G.STATE).."\n")
+
+        -- Diagnose state=-1 crash: log full context when G.STATE goes negative
+        if type(G.STATE) == "number" and G.STATE < 0 then
+            local rr   = G.GAME and G.GAME.round_resets or {}
+            local bl   = G.GAME and G.GAME.blind or {}
+            local cr   = G.GAME and G.GAME.current_round or {}
+            love.filesystem.append(LOG_FILE,
+                os.time() .. " [CRASH] state=-1 context:"
+                .. " prev_state=" .. tostring(prev)
+                .. " ante=" .. tostring(rr.ante)
+                .. " bod=" .. tostring(rr.blind_on_deck)
+                .. " blind=" .. tostring(bl.name)
+                .. " boss=" .. tostring(bl.boss)
+                .. " hands_left=" .. tostring(cr.hands_left)
+                .. " discards_left=" .. tostring(cr.discards_left)
+                .. " chips=" .. tostring(G.GAME and G.GAME.chips)
+                .. " dollars=" .. tostring(G.GAME and G.GAME.dollars)
+                .. " hook_fired=" .. tostring(BalatroRL._hook_skip_fired)
+                .. " stuck_fired=" .. tostring(BalatroRL._stuck_fired)
+                .. " ante_guard=" .. tostring(BalatroRL._ante_guard_fired)
+                .. "\n")
+        end
     end
 
     -- Auto-nav from main menu: fires start_run 2s after MENU loads
@@ -663,13 +685,32 @@ Game.update = function(self, dt)
                 }))
             else
                 -- LOST: force new run
+                local bl_name  = G.GAME and G.GAME.blind and G.GAME.blind.name or "?"
+                local bl_boss  = G.GAME and G.GAME.blind and G.GAME.blind.boss or false
+                local bl_key   = rr and rr.blind_choices and rr.blind_choices[bod] or "?"
+                local e_count  = G.E_MANAGER and #G.E_MANAGER.queue or "?"
                 love.filesystem.append(LOG_FILE, os.time()
                     .. " watchdog: LOST stuck — forcing new_run chips=" .. tostring(chips)
-                    .. " target=" .. tostring(target) .. "\n")
+                    .. " target=" .. tostring(target)
+                    .. " blind=" .. tostring(bl_name)
+                    .. " boss=" .. tostring(bl_boss)
+                    .. " bl_key=" .. tostring(bl_key)
+                    .. " bod=" .. tostring(bod)
+                    .. " E_MGR_queue=" .. tostring(e_count)
+                    .. " G.STATE=" .. tostring(G.STATE) .. "\n")
                 G.E_MANAGER:add_event(Event({
                     trigger = "after",
                     delay   = 0.5,
-                    func    = function() pcall(G.FUNCS.start_run, nil, {stake = 1}); return true end
+                    func    = function()
+                        love.filesystem.append(LOG_FILE,
+                            os.time() .. " watchdog: start_run firing now G.STATE=" .. tostring(G.STATE) .. "\n")
+                        local ok, err = pcall(G.FUNCS.start_run, nil, {stake = 1})
+                        love.filesystem.append(LOG_FILE,
+                            os.time() .. " watchdog: start_run result=" .. tostring(ok)
+                            .. " err=" .. tostring(err)
+                            .. " G.STATE_after=" .. tostring(G.STATE) .. "\n")
+                        return true
+                    end
                 }))
             end
         end
