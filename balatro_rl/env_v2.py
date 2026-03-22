@@ -145,7 +145,13 @@ class BalatroEnvV2(gym.Env):
         # Update logging metadata
         self._last_seed = gs.seed
         self._last_ante = gs.ante
-        self._last_round = gs.round
+        # Derive round from blind_name (G.GAME.round is cumulative, not 0/1/2)
+        if gs.blind_name == "Small Blind":
+            self._last_round = 0
+        elif gs.blind_name == "Big Blind":
+            self._last_round = 1
+        else:
+            self._last_round = 2  # Boss blind
         self._last_blind = gs.blind_name
         self._last_score = int(gs.current_score)
         self._last_hand_type = gs.last_hand_type
@@ -214,7 +220,13 @@ class BalatroEnvV2(gym.Env):
         # Update metadata
         self._last_seed = new_gs.seed
         self._last_ante = new_gs.ante
-        self._last_round = new_gs.round
+        # Derive round from blind_name
+        if new_gs.blind_name == "Small Blind":
+            self._last_round = 0
+        elif new_gs.blind_name == "Big Blind":
+            self._last_round = 1
+        else:
+            self._last_round = 2  # Boss blind
         self._last_blind = new_gs.blind_name
         self._last_score = int(new_gs.current_score)
         self._last_hand_type = new_gs.last_hand_type
