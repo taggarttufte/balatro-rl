@@ -64,6 +64,7 @@ local function card_info(card)
         seal        = (card.seal  or "none"),
         edition     = (card.edition and card.edition.type) or "none",
         highlighted = card.highlighted or false,
+        debuff      = card.debuff or false,  -- Boss blind debuffs (The Goad, The Plant, etc.)
     }
 end
 
@@ -378,16 +379,26 @@ local function estimate_score(cards, hand_name, jokers)
     local bonus_chips, bonus_mult, mult_mult = estimate_joker_bonus(cards, hand_name, jokers)
     
     -- Card chip values (sum of rank values for scoring cards)
+    -- Skip debuffed cards (boss blinds like The Goad, The Plant, etc.)
     local card_chips = 0
+    local scoring_cards = 0
     for _, c in ipairs(cards) do
-        local r = c.rank_id or 0
-        if r >= 2 and r <= 10 then
-            card_chips = card_chips + r
-        elseif r >= 11 and r <= 13 then  -- J/Q/K
-            card_chips = card_chips + 10
-        elseif r == 14 then  -- Ace
-            card_chips = card_chips + 11
+        if not c.debuff then
+            scoring_cards = scoring_cards + 1
+            local r = c.rank_id or 0
+            if r >= 2 and r <= 10 then
+                card_chips = card_chips + r
+            elseif r >= 11 and r <= 13 then  -- J/Q/K
+                card_chips = card_chips + 10
+            elseif r == 14 then  -- Ace
+                card_chips = card_chips + 11
+            end
         end
+    end
+    
+    -- If all cards debuffed, hand scores nothing
+    if scoring_cards == 0 then
+        return 0
     end
     
     local total_chips = base_chips + bonus_chips + card_chips
