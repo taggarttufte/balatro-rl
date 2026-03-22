@@ -95,6 +95,8 @@ class BalatroEnvV2(gym.Env):
         # Logging metadata
         self._last_seed = "unknown"
         self._last_ante = 1
+        self._last_round = 0
+        self._last_blind = "Small Blind"
         self._last_score = 0
         self._last_hand_type = "unknown"
         self._last_joker_names = []
@@ -143,6 +145,8 @@ class BalatroEnvV2(gym.Env):
         # Update logging metadata
         self._last_seed = gs.seed
         self._last_ante = gs.ante
+        self._last_round = gs.round
+        self._last_blind = gs.blind_name
         self._last_score = int(gs.current_score)
         self._last_hand_type = gs.last_hand_type
         self._last_joker_names = [j.name for j in gs.jokers if j.is_present]
@@ -210,6 +214,8 @@ class BalatroEnvV2(gym.Env):
         # Update metadata
         self._last_seed = new_gs.seed
         self._last_ante = new_gs.ante
+        self._last_round = new_gs.round
+        self._last_blind = new_gs.blind_name
         self._last_score = int(new_gs.current_score)
         self._last_hand_type = new_gs.last_hand_type
         self._last_joker_names = [j.name for j in new_gs.jokers if j.is_present]

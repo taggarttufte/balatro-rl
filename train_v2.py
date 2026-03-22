@@ -93,6 +93,8 @@ class EpisodeLoggerV2(BaseCallback):
             ep_len = len(self._ep_steps)
             seed = getattr(actual_env, "_last_seed", "unknown")
             ante = getattr(actual_env, "_last_ante", 1)
+            round_num = getattr(actual_env, "_last_round", 0)
+            blind = getattr(actual_env, "_last_blind", "Small Blind")
             score = getattr(actual_env, "_last_score", 0)
             
             ep_record = {
@@ -102,6 +104,8 @@ class EpisodeLoggerV2(BaseCallback):
                 "length": ep_len,
                 "seed": seed,
                 "ante": ante,
+                "round": round_num,
+                "blind": blind,
                 "score": score,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
