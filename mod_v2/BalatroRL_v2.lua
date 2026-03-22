@@ -582,7 +582,14 @@ function BalatroRL.capture(event)
         seed           = game.seed or "unknown",
         ante           = (game.round_resets and game.round_resets.ante) or 0,
         round          = game.round or 0,
-        blind_name     = blind.name  or "unknown",
+        -- Derive blind name from round position if not boss (G.GAME.blind persists boss name)
+        blind_name     = (function()
+            if blind.boss then return blind.name or "Boss Blind" end
+            local r = (game.round or 0) % 3
+            if r == 0 then return "Small Blind"
+            elseif r == 1 then return "Big Blind"
+            else return blind.name or "Boss Blind" end
+        end)(),
         blind_chips    = blind.chips or 0,
         blind_boss     = blind.boss  or false,
         hands_left     = round.hands_left    or 0,
