@@ -128,19 +128,37 @@ python analyze.py          # Reward trends by bin
 
 ---
 
-## Training Progress
+## Results
 
-As of ~700 episodes / 110k timesteps:
+### V1 Final Results (March 2026)
 
-- **Best run:** Ante 4 (cleared 9 blinds), reward 6.08
-- **Reward trend:** −1.48 → −0.75 over training
-- Agent has discovered discard-heavy play (52 discards vs 11 plays in best run)
-- Has not yet learned flush/straight detection or joker synergies
+| Metric | Value |
+|--------|-------|
+| Total episodes | 26,412 |
+| Total timesteps | 376,409 |
+| Best reward | 62.69 |
+| Best ante | 5 |
 
-**Planned improvements:**
-- Add deck composition to observation (remaining rank/suit counts, +17 features)
-- Score simulation: Lua calculates predicted chip×mult for candidate hands
-- Joker categorization (scoring / deck-fixing / economy) as obs features
+**Ante distribution:**
+- Ante 1: 98.1%
+- Ante 2+: 1.89%
+- Ante 3+: 0.67%
+
+**Post-bugfix performance:** 5.54 avg reward, 2.38% ante 2+ rate
+
+**Key finding:** V1 plateaued — the agent learned basic macro strategy (discard weak cards, play strong combinations) but couldn't improve further without card evaluation. Deep runs (ante 3+) were joker lottery, not learned skill.
+
+See [V1_RESULTS.md](V1_RESULTS.md) for full analysis.
+
+### V2 (In Development)
+
+V2 addresses V1's ceiling with pre-ranked play/discard options:
+- `Discrete(20)` action space: top 10 plays + 10 discard options
+- Lua-side hand evaluation with joker bonus estimation (~25 jokers implemented)
+- Deck composition in observation space (13 ranks + 4 suits)
+- Discard reward based on Δ best_play_score
+
+Early V2 results (first 50 episodes): **5.3% ante 2+ rate** vs V1's 1.89% — promising improvement from action space design alone.
 
 ---
 

@@ -24,7 +24,7 @@ def main():
         print("ERROR: Could not read state.json. Is Balatro running with V2 mod?")
         return
     
-    print(f"✓ State read successfully")
+    print(f"[OK] State read successfully")
     print(f"  Event: {gs.event}")
     print(f"  Ante: {gs.ante}, Blind: {gs.blind_name}")
     print(f"  Hands: {gs.hands_left}, Discards: {gs.discards_left}")
