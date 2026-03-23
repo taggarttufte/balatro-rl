@@ -2,6 +2,11 @@
 -- Writes state.json on state changes. Executes card play/discard from action.json.
 -- Navigation modes: Lua (headless) or Python/pyautogui (mouse). Toggle in mod config.
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CUSTOM GAME SPEED (requires Handy mod)
+-- Set to nil to use Handy's default, or a number for custom speed (e.g., 100)
+-- ═══════════════════════════════════════════════════════════════════════════
+local CUSTOM_GAME_SPEED = 100  -- Set custom speed (nil = use Handy default)
 
 BalatroRL = {}
 
@@ -1229,6 +1234,25 @@ Game.update = function(self, dt)
 end
 
 BalatroRL.write("mod_loaded")
+
+-- Set custom game speed if configured (requires Handy mod)
+if CUSTOM_GAME_SPEED and CUSTOM_GAME_SPEED > 0 then
+    -- Defer until Handy is loaded
+    local function set_custom_speed()
+        if Handy and Handy.speed_multiplier then
+            Handy.speed_multiplier.value = CUSTOM_GAME_SPEED
+            Handy.speed_multiplier.localize_value()
+            love.filesystem.append(LOG_FILE, os.time() .. " Custom speed set: " .. CUSTOM_GAME_SPEED .. "x\n")
+        end
+    end
+    -- Try immediately and also hook into game start
+    pcall(set_custom_speed)
+    local orig_start_run = G.FUNCS.start_run
+    G.FUNCS.start_run = function(...)
+        pcall(set_custom_speed)
+        return orig_start_run(...)
+    end
+end
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- MINIMAL GRAPHICS MODE
