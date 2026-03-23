@@ -195,9 +195,14 @@ class RestartCallback(BaseCallback):
     
     def __init__(self, verbose=0):
         super().__init__(verbose)
-        self._last_restart = 0
+        self._last_restart = None  # Set on first step
     
     def _on_step(self) -> bool:
+        # Initialize on first step (handles resume correctly)
+        if self._last_restart is None:
+            self._last_restart = self.num_timesteps
+            return True
+        
         if self.num_timesteps - self._last_restart >= self.RESTART_EVERY:
             self._last_restart = self.num_timesteps
             print(f"\n🔄 Periodic restart at step {self.num_timesteps}...")

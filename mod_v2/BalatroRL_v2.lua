@@ -1234,7 +1234,7 @@ BalatroRL.write("mod_loaded")
 -- MINIMAL GRAPHICS MODE
 -- Set to true for faster training with simple HUD overlay
 -- ═══════════════════════════════════════════════════════════════════════════
-local MINIMAL_GRAPHICS = false  -- Toggle this to enable/disable
+local MINIMAL_GRAPHICS = true  -- Toggle this to enable/disable
 
 local frame_counter = 0
 local activity_timer = 0
