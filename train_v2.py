@@ -68,6 +68,11 @@ class EpisodeLoggerV2(BaseCallback):
         self._ep_reward = 0.0
         self._ep_steps = []
         self._recent_buf = []
+        
+        # Timing tracking
+        self._training_start = time.time()
+        self._last_rate_check = time.time()
+        self._last_rate_eps = 0
     
     def _on_step(self) -> bool:
         action = int(self.locals["actions"][0])
@@ -98,6 +103,26 @@ class EpisodeLoggerV2(BaseCallback):
             score = getattr(actual_env, "_last_score", 0)
             terminal_reason = getattr(actual_env, "_terminal_reason", "unknown")
             
+            # Calculate timing stats
+            elapsed_total = time.time() - self._training_start
+            elapsed_min = elapsed_total / 60
+            eps_per_hour = (self.episode_count / elapsed_total) * 3600 if elapsed_total > 0 else 0
+            
+            # Recent rate (last 100 episodes)
+            if self.episode_count % 100 == 0:
+                recent_elapsed = time.time() - self._last_rate_check
+                recent_eps = self.episode_count - self._last_rate_eps
+                recent_rate = (recent_eps / recent_elapsed) * 3600 if recent_elapsed > 0 else 0
+                self._last_rate_check = time.time()
+                self._last_rate_eps = self.episode_count
+                
+                # Estimate time to 25k
+                remaining_eps = max(0, 25000 - self.episode_count)
+                eta_hours = remaining_eps / recent_rate if recent_rate > 0 else float('inf')
+                
+                print(f"\n📊 [{elapsed_min:.0f}m] Rate: {recent_rate:.0f} eps/hr | "
+                      f"ETA to 25k: {eta_hours:.1f}h")
+            
             ep_record = {
                 "episode": self.episode_count,
                 "timestep": self.num_timesteps,
@@ -110,6 +135,8 @@ class EpisodeLoggerV2(BaseCallback):
                 "score": score,
                 "terminal": terminal_reason,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "elapsed_min": round(elapsed_min, 1),
+                "eps_per_hour": round(eps_per_hour, 1),
             }
             
             # Always: summary log
