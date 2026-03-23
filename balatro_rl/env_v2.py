@@ -26,7 +26,7 @@ from balatro_rl.action_v2 import (
 # ── Speed configuration ───────────────────────────────────────────────────────
 # Adjust based on Handy mod speed multiplier
 # 1.0 = 32x, 0.5 = 64x, 0.32 = 100x, 0.25 = 128x
-SPEED_FACTOR = 0.32  # For 100x Handy speed
+SPEED_FACTOR = 0.5  # For 64x Handy speed
 
 # ── Balatro process management ────────────────────────────────────────────────
 
@@ -334,6 +334,7 @@ class BalatroEnvV2(gym.Env):
     def _wait_for_hand_ready(self, old_ts: float, timeout: float) -> GameState | None:
         HAND_EVENTS = ("selecting_hand", "hand_drawn")
         deadline = time.time() + timeout
+        shop_stuck_time = None
         while time.time() < deadline:
             gs = read_state(timeout=1.0)
             if gs is None:
@@ -343,6 +344,16 @@ class BalatroEnvV2(gym.Env):
                 return gs
             if gs.hand and gs.event in HAND_EVENTS:
                 return gs
+            # Detect stuck in shop - force leave after 10 seconds
+            if gs.event == "shop":
+                if shop_stuck_time is None:
+                    shop_stuck_time = time.time()
+                elif time.time() - shop_stuck_time > 10:
+                    print("[WARN] Stuck in shop, forcing leave...")
+                    write_action([], "leave_shop")
+                    shop_stuck_time = time.time()
+            else:
+                shop_stuck_time = None
             time.sleep(0.05 * SPEED_FACTOR)
         return None
 
@@ -350,6 +361,7 @@ class BalatroEnvV2(gym.Env):
         """Post-action: wait for NEXT actionable state (tick > old_ts)."""
         HAND_EVENTS = ("selecting_hand", "hand_drawn")
         deadline = time.time() + timeout
+        shop_stuck_time = None
         while time.time() < deadline:
             gs = read_state(timeout=1.0)
             if gs is None:
@@ -362,6 +374,16 @@ class BalatroEnvV2(gym.Env):
                 return gs
             if gs.hand and gs.event in HAND_EVENTS:
                 return gs
+            # Detect stuck in shop - force leave after 10 seconds
+            if gs.event == "shop":
+                if shop_stuck_time is None:
+                    shop_stuck_time = time.time()
+                elif time.time() - shop_stuck_time > 10:
+                    print("[WARN] Stuck in shop, forcing leave...")
+                    write_action([], "leave_shop")
+                    shop_stuck_time = time.time()
+            else:
+                shop_stuck_time = None
             time.sleep(0.05 * SPEED_FACTOR)
         return None
 
