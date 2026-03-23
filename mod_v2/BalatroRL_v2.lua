@@ -1229,3 +1229,91 @@ Game.update = function(self, dt)
 end
 
 BalatroRL.write("mod_loaded")
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- MINIMAL GRAPHICS MODE
+-- Set to true for faster training with simple HUD overlay
+-- ═══════════════════════════════════════════════════════════════════════════
+local MINIMAL_GRAPHICS = false  -- Toggle this to enable/disable
+
+local orig_love_draw = love.draw
+love.draw = function()
+    if not MINIMAL_GRAPHICS then
+        -- Normal rendering
+        if orig_love_draw then orig_love_draw() end
+        return
+    end
+    
+    -- Minimal HUD mode: black screen with essential info
+    love.graphics.clear(0.05, 0.05, 0.08, 1)  -- Dark background
+    love.graphics.setColor(1, 1, 1, 1)
+    
+    local y = 20
+    local x = 20
+    local line_height = 24
+    
+    -- Title
+    love.graphics.setColor(0.4, 0.8, 1, 1)
+    love.graphics.print("BALATRO RL - TRAINING MODE", x, y)
+    y = y + line_height * 1.5
+    
+    if not G or not G.GAME then
+        love.graphics.setColor(1, 1, 0, 1)
+        love.graphics.print("Waiting for game...", x, y)
+        return
+    end
+    
+    local game = G.GAME
+    local round_resets = game.round_resets or {}
+    
+    -- Ante & Blind
+    love.graphics.setColor(1, 0.9, 0.3, 1)  -- Gold
+    local ante = round_resets.ante or 1
+    local blind_name = game.blind and game.blind.name or "Unknown"
+    love.graphics.print(string.format("ANTE %d  |  %s", ante, blind_name), x, y)
+    y = y + line_height * 1.5
+    
+    -- Score
+    love.graphics.setColor(0.3, 1, 0.5, 1)  -- Green
+    local score = game.chips or 0
+    local target = game.blind and game.blind.chips or 1
+    local progress = math.min(score / target, 1) * 100
+    love.graphics.print(string.format("SCORE: %s / %s  (%.0f%%)", 
+        BalatroRL.format_number(score),
+        BalatroRL.format_number(target),
+        progress), x, y)
+    y = y + line_height
+    
+    -- Progress bar
+    local bar_width = 300
+    local bar_height = 16
+    love.graphics.setColor(0.2, 0.2, 0.2, 1)
+    love.graphics.rectangle("fill", x, y, bar_width, bar_height)
+    love.graphics.setColor(0.3, 1, 0.5, 1)
+    love.graphics.rectangle("fill", x, y, bar_width * math.min(score / target, 1), bar_height)
+    y = y + line_height * 1.5
+    
+    -- Hands & Discards
+    love.graphics.setColor(0.7, 0.7, 1, 1)  -- Light blue
+    local hands = game.current_round and game.current_round.hands_left or 0
+    local discards = game.current_round and game.current_round.discards_left or 0
+    love.graphics.print(string.format("HANDS: %d  |  DISCARDS: %d", hands, discards), x, y)
+    y = y + line_height * 1.5
+    
+    -- State
+    love.graphics.setColor(0.6, 0.6, 0.6, 1)
+    local state_name = "UNKNOWN"
+    if G.STATE and G.STATES then
+        for name, val in pairs(G.STATES) do
+            if G.STATE == val then state_name = name break end
+        end
+    end
+    love.graphics.print(string.format("STATE: %s", state_name), x, y)
+    y = y + line_height
+    
+    -- Money & Jokers
+    love.graphics.setColor(1, 0.8, 0.2, 1)
+    local money = game.dollars or 0
+    local joker_count = G.jokers and G.jokers.cards and #G.jokers.cards or 0
+    love.graphics.print(string.format("$%d  |  JOKERS: %d", money, joker_count), x, y)
+end
