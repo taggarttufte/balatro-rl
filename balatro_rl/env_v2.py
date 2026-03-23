@@ -23,6 +23,11 @@ from balatro_rl.action_v2 import (
     write_action, generate_action_mask, action_to_cards_and_type, ACTION_FILE
 )
 
+# ── Speed configuration ───────────────────────────────────────────────────────
+# Adjust based on Handy mod speed multiplier
+# 1.0 = 32x (default), 0.5 = 64x, 0.25 = 128x
+SPEED_FACTOR = 0.5  # For 64x Handy speed
+
 # ── Balatro process management ────────────────────────────────────────────────
 
 _BALATRO_EXE = os.environ.get(
@@ -167,7 +172,7 @@ class BalatroEnvV2(gym.Env):
         # Check if blind already cleared (score >= target) — wait for transition
         if gs.current_score >= gs.score_target and gs.score_target > 0:
             # Blind is cleared, wait for game to transition
-            time.sleep(0.3)
+            time.sleep(0.3 * SPEED_FACTOR)
             new_gs = self._wait_for_next_hand(gs.timestamp, timeout=5.0)
             if new_gs:
                 self._gs = new_gs
@@ -208,7 +213,7 @@ class BalatroEnvV2(gym.Env):
         elif new_gs.hands_left <= 0 and new_gs.discards_left <= 0:
             # The Hook and other bosses can have delayed scoring — retry multiple times
             for retry in range(4):
-                time.sleep(0.25)
+                time.sleep(0.25 * SPEED_FACTOR)
                 fresh = read_state(timeout=1.0)
                 if fresh:
                     new_gs = fresh
@@ -224,7 +229,7 @@ class BalatroEnvV2(gym.Env):
                 terminated = True
                 self._terminal_reason = "lost"
             else:
-                time.sleep(0.5)
+                time.sleep(0.5 * SPEED_FACTOR)
                 fresh = read_state(timeout=1.0)
                 if fresh:
                     new_gs = fresh
@@ -332,13 +337,13 @@ class BalatroEnvV2(gym.Env):
         while time.time() < deadline:
             gs = read_state(timeout=1.0)
             if gs is None:
-                time.sleep(0.1)
+                time.sleep(0.1 * SPEED_FACTOR)
                 continue
             if gs.event == "game_over":
                 return gs
             if gs.hand and gs.event in HAND_EVENTS:
                 return gs
-            time.sleep(0.05)
+            time.sleep(0.05 * SPEED_FACTOR)
         return None
 
     def _wait_for_next_hand(self, old_ts: float, timeout: float) -> GameState | None:
@@ -348,16 +353,16 @@ class BalatroEnvV2(gym.Env):
         while time.time() < deadline:
             gs = read_state(timeout=1.0)
             if gs is None:
-                time.sleep(0.1)
+                time.sleep(0.1 * SPEED_FACTOR)
                 continue
             if gs.timestamp <= old_ts:
-                time.sleep(0.05)
+                time.sleep(0.05 * SPEED_FACTOR)
                 continue
             if gs.event == "game_over":
                 return gs
             if gs.hand and gs.event in HAND_EVENTS:
                 return gs
-            time.sleep(0.05)
+            time.sleep(0.05 * SPEED_FACTOR)
         return None
 
     def _wait_for_new_run(self, timeout: float) -> GameState | None:
@@ -373,7 +378,7 @@ class BalatroEnvV2(gym.Env):
         while time.time() < deadline:
             gs = read_state(timeout=1.0)
             if gs is None:
-                time.sleep(0.3)
+                time.sleep(0.3 * SPEED_FACTOR)
                 continue
             
             # Track staleness
@@ -414,7 +419,7 @@ class BalatroEnvV2(gym.Env):
                     and gs.file_mtime > baseline_mtime):
                 return gs
             
-            time.sleep(0.1)
+            time.sleep(0.1 * SPEED_FACTOR)
         return None
 
     # ── Helpers ───────────────────────────────────────────────────────────────

@@ -722,7 +722,7 @@ end
 
 -- ── Game.update hook ──────────────────────────────────────────────────────────
 
-local POLL_INTERVAL = 0.1
+local POLL_INTERVAL = 0.05  -- 50ms for faster game speeds (64x+)
 local poll_timer    = 0
 local last_G_STATE  = nil
 
