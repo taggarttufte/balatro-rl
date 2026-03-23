@@ -728,7 +728,15 @@ local last_G_STATE  = nil
 
 local orig_game_update = Game.update
 Game.update = function(self, dt)
-    orig_game_update(self, dt)
+    -- Wrap in pcall to handle round_eval nil crashes during transitions
+    local ok, err = pcall(orig_game_update, self, dt)
+    if not ok then
+        -- Log but don't crash; game will recover on next frame
+        if BalatroRL.cfg().debug_log then
+            BalatroRL.log("Game.update error (recovering): " .. tostring(err))
+        end
+        return
+    end
     poll_timer = poll_timer + dt
     if poll_timer < POLL_INTERVAL then return end
     poll_timer = 0
