@@ -29,7 +29,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from balatro_rl.env_v2 import BalatroEnvV2
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# -- Paths ---------------------------------------------------------------------
 
 CHECKPOINT_DIR = Path("checkpoints_v2")
 LOG_DIR = Path("logs_v2")
@@ -39,13 +39,13 @@ BALATRO_EXE = os.environ.get(
 )
 STATE_JSON = Path.home() / "AppData/Roaming/Balatro/balatro_rl/state.json"
 
-# ── Action masking wrapper ────────────────────────────────────────────────────
+# -- Action masking wrapper ----------------------------------------------------
 
 def mask_fn(env):
     """Return action mask from the underlying BalatroEnvV2."""
     return env.action_masks()
 
-# ── Callbacks ─────────────────────────────────────────────────────────────────
+# -- Callbacks -----------------------------------------------------------------
 
 class EpisodeLoggerV2(BaseCallback):
     """Log episode stats and save best runs."""
@@ -120,7 +120,7 @@ class EpisodeLoggerV2(BaseCallback):
                 remaining_eps = max(0, 25000 - self.episode_count)
                 eta_hours = remaining_eps / recent_rate if recent_rate > 0 else float('inf')
                 
-                print(f"\n📊 [{elapsed_min:.0f}m] Rate: {recent_rate:.0f} eps/hr | "
+                print(f"\n[STATS] [{elapsed_min:.0f}m] Rate: {recent_rate:.0f} eps/hr | "
                       f"ETA to 25k: {eta_hours:.1f}h")
             
             ep_record = {
@@ -155,7 +155,7 @@ class EpisodeLoggerV2(BaseCallback):
                 best_record = {**ep_record, "steps": self._ep_steps}
                 with self.best_log.open("a") as f:
                     f.write(json.dumps(best_record) + "\n")
-                print(f"\n★ New best! Episode {self.episode_count} | "
+                print(f"\n* New best! Episode {self.episode_count} | "
                       f"reward={self._ep_reward:.1f} | ante={ante} | seed={seed}")
             
             # Rolling top-10
@@ -184,7 +184,7 @@ class CheckpointCallback(BaseCallback):
         if self.num_timesteps % self.save_freq == 0:
             path = CHECKPOINT_DIR / f"ppo_v2_{self.num_timesteps}.zip"
             self.model.save(str(path))
-            print(f"\n💾 Checkpoint saved: {path.name}")
+            print(f"\n[SAVE] Checkpoint saved: {path.name}")
         return True
 
 
@@ -205,7 +205,7 @@ class RestartCallback(BaseCallback):
         
         if self.num_timesteps - self._last_restart >= self.RESTART_EVERY:
             self._last_restart = self.num_timesteps
-            print(f"\n🔄 Periodic restart at step {self.num_timesteps}...")
+            print(f"\n[RESTART] Periodic restart at step {self.num_timesteps}...")
             restart_balatro()
         return True
 
@@ -231,14 +231,14 @@ class WatchdogCallback(BaseCallback):
         # Check for staleness
         stale_time = now - self._last_step_time
         if stale_time > self.STALE_SECONDS:
-            print(f"\n⚠️ WATCHDOG: No progress for {stale_time:.0f}s — forcing restart...")
+            print(f"\n[WARN] WATCHDOG: No progress for {stale_time:.0f}s -- forcing restart...")
             restart_balatro()
             self._last_step_time = time.time()
         
         return True
 
 
-# ── Balatro management ────────────────────────────────────────────────────────
+# -- Balatro management --------------------------------------------------------
 
 def restart_balatro():
     """Kill and relaunch Balatro."""
@@ -279,7 +279,7 @@ def find_latest_checkpoint():
     return max(checkpoints, key=lambda p: int(p.stem.split("_")[-1]))
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="V2 Balatro RL Training")
@@ -364,10 +364,11 @@ def main():
             reset_num_timesteps=not args.resume,
         )
     except KeyboardInterrupt:
-        print("\n⏸️ Training interrupted. Saving checkpoint...")
+        print("\n[INTERRUPT] Training interrupted. Saving checkpoint...")
         model.save(str(CHECKPOINT_DIR / f"ppo_v2_interrupted_{model.num_timesteps}.zip"))
         print("Saved.")
 
 
 if __name__ == "__main__":
     main()
+
