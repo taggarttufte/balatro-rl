@@ -304,10 +304,10 @@ def main():
     if args.resume:
         ckpt = find_latest_checkpoint()
         if ckpt:
-            print(f"📂 Resuming from {ckpt.name}")
+            print(f"[RESUME] Loading from {ckpt.name}")
             model = MaskablePPO.load(str(ckpt), env=vec_env)
         else:
-            print("⚠️ No checkpoint found, starting fresh")
+            print("[WARN] No checkpoint found, starting fresh")
             model = MaskablePPO(
                 "MlpPolicy",
                 vec_env,
@@ -324,7 +324,7 @@ def main():
                 tensorboard_log=str(LOG_DIR / "tensorboard"),
             )
     else:
-        print("🆕 Starting fresh V2 training")
+        print("[NEW] Starting fresh V2 training")
         model = MaskablePPO(
             "MlpPolicy",
             vec_env,
