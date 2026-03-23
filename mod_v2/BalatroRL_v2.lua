@@ -1236,6 +1236,10 @@ BalatroRL.write("mod_loaded")
 -- ═══════════════════════════════════════════════════════════════════════════
 local MINIMAL_GRAPHICS = false  -- Toggle this to enable/disable
 
+local frame_counter = 0
+local activity_timer = 0
+local last_action_time = 0
+
 local orig_love_draw = love.draw
 love.draw = function()
     if not MINIMAL_GRAPHICS then
@@ -1316,4 +1320,32 @@ love.draw = function()
     local money = game.dollars or 0
     local joker_count = G.jokers and G.jokers.cards and #G.jokers.cards or 0
     love.graphics.print(string.format("$%d  |  JOKERS: %d", money, joker_count), x, y)
+    y = y + line_height * 2
+    
+    -- Activity indicator
+    frame_counter = frame_counter + 1
+    activity_timer = activity_timer + (love.timer.getDelta() or 0.016)
+    
+    -- Animated progress bar (cycles every 2 seconds)
+    local bar_width = 200
+    local bar_height = 8
+    local cycle_pos = (activity_timer % 2) / 2  -- 0 to 1 over 2 seconds
+    
+    love.graphics.setColor(0.2, 0.2, 0.2, 1)
+    love.graphics.rectangle("fill", x, y, bar_width, bar_height)
+    
+    -- Moving segment
+    local segment_width = 40
+    local segment_x = x + (bar_width - segment_width) * cycle_pos
+    love.graphics.setColor(0, 1, 0.5, 1)  -- Bright green
+    love.graphics.rectangle("fill", segment_x, y, segment_width, bar_height)
+    
+    y = y + line_height
+    
+    -- Frame counter & uptime
+    love.graphics.setColor(0.4, 0.4, 0.4, 1)
+    local uptime_min = math.floor(activity_timer / 60)
+    local uptime_sec = math.floor(activity_timer % 60)
+    love.graphics.print(string.format("FRAME: %d  |  UPTIME: %d:%02d", 
+        frame_counter, uptime_min, uptime_sec), x, y)
 end
