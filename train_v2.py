@@ -210,6 +210,34 @@ class RestartCallback(BaseCallback):
         return True
 
 
+class WatchdogCallback(BaseCallback):
+    """Detect stuck training and force restart if no progress."""
+    
+    STALE_SECONDS = 120  # 2 minutes with no steps = stuck
+    
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self._last_step_time = time.time()
+        self._last_timesteps = 0
+    
+    def _on_step(self) -> bool:
+        now = time.time()
+        
+        # Check if we've made progress
+        if self.num_timesteps > self._last_timesteps:
+            self._last_step_time = now
+            self._last_timesteps = self.num_timesteps
+        
+        # Check for staleness
+        stale_time = now - self._last_step_time
+        if stale_time > self.STALE_SECONDS:
+            print(f"\n⚠️ WATCHDOG: No progress for {stale_time:.0f}s — forcing restart...")
+            restart_balatro()
+            self._last_step_time = time.time()
+        
+        return True
+
+
 # ── Balatro management ────────────────────────────────────────────────────────
 
 def restart_balatro():
@@ -318,6 +346,7 @@ def main():
         EpisodeLoggerV2(),
         CheckpointCallback(save_freq=10_000),
         RestartCallback(),
+        WatchdogCallback(),  # Force restart if stuck for 2+ minutes
     ]
     
     print(f"\n{'='*60}")
