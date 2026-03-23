@@ -429,6 +429,16 @@ class BalatroEnvV2(gym.Env):
                 last_mtime_wall = time.time()
                 last_seen_mtime = 0.0
             
+            # Stuck in shop during reset - restart after 15 seconds
+            if gs.event == "shop" and time.time() - last_mtime_wall > 15.0:
+                print(f"[BalatroEnvV2] Stuck in shop during reset — restarting Balatro")
+                try:
+                    _balatro_restart()
+                except Exception as e:
+                    print(f"[BalatroEnvV2] Restart failed: {e}")
+                last_mtime_wall = time.time()
+                last_seen_mtime = 0.0
+            
             # Accept valid new run state
             is_stuck = (gs.hands_left <= 0 and gs.discards_left <= 0
                         and gs.current_score < gs.score_target)
