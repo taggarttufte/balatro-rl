@@ -101,6 +101,7 @@ class BalatroEnvV2(gym.Env):
         self._last_hand_type = "unknown"
         self._last_joker_names = []
         self._episode_reward = 0.0
+        self._terminal_reason = "unknown"
         
         self._consecutive_timeouts = 0
         self._last_live_tick = 0.0
@@ -199,9 +200,11 @@ class BalatroEnvV2(gym.Env):
         
         # Terminal detection
         terminated = False
+        self._terminal_reason = "ongoing"
         if self._is_terminal_fast(new_gs):
             print(f"[term] FAST: event={new_gs.event} ante={new_gs.ante}")
             terminated = True
+            self._terminal_reason = "won" if new_gs.ante > 8 else "game_over"
         elif new_gs.hands_left <= 0 and new_gs.discards_left <= 0:
             # The Hook and other bosses can have delayed scoring — retry multiple times
             for retry in range(4):
@@ -219,12 +222,15 @@ class BalatroEnvV2(gym.Env):
                 print(f"[term] LOST: h={new_gs.hands_left} d={new_gs.discards_left}"
                       f" score={new_gs.current_score:.0f} target={new_gs.score_target:.0f}")
                 terminated = True
+                self._terminal_reason = "lost"
             else:
                 time.sleep(0.5)
                 fresh = read_state(timeout=1.0)
                 if fresh:
                     new_gs = fresh
                 terminated = self._is_terminal(new_gs)
+                if terminated:
+                    self._terminal_reason = "won" if new_gs.ante > 8 else "lost"
         
         # Update metadata
         self._last_seed = new_gs.seed

@@ -96,6 +96,7 @@ class EpisodeLoggerV2(BaseCallback):
             round_num = getattr(actual_env, "_last_round", 0)
             blind = getattr(actual_env, "_last_blind", "Small Blind")
             score = getattr(actual_env, "_last_score", 0)
+            terminal_reason = getattr(actual_env, "_terminal_reason", "unknown")
             
             ep_record = {
                 "episode": self.episode_count,
@@ -107,6 +108,7 @@ class EpisodeLoggerV2(BaseCallback):
                 "round": round_num,
                 "blind": blind,
                 "score": score,
+                "terminal": terminal_reason,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
             
