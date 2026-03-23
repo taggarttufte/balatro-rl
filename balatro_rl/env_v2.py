@@ -163,6 +163,15 @@ class BalatroEnvV2(gym.Env):
             obs = state_to_obs(gs)
             return obs, R_LOSE, True, False, self._make_info(gs)
         
+        # Check if blind already cleared (score >= target) — wait for transition
+        if gs.current_score >= gs.score_target and gs.score_target > 0:
+            # Blind is cleared, wait for game to transition
+            time.sleep(0.3)
+            new_gs = self._wait_for_next_hand(gs.timestamp, timeout=5.0)
+            if new_gs:
+                self._gs = new_gs
+                gs = new_gs
+        
         # Store pre-action state for reward computation
         pre_best_score = gs.best_play_score
         
