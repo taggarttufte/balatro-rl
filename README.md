@@ -150,15 +150,34 @@ python analyze.py          # Reward trends by bin
 
 See [V1_RESULTS.md](V1_RESULTS.md) for full analysis.
 
-### V2 (In Development)
+### V2 Current Results (March 2026)
 
 V2 addresses V1's ceiling with pre-ranked play/discard options:
 - `Discrete(20)` action space: top 10 plays + 10 discard options
 - Lua-side hand evaluation with joker bonus estimation (~25 jokers implemented)
 - Deck composition in observation space (13 ranks + 4 suits)
+- MaskablePPO from sb3-contrib for action masking
 - Discard reward based on Δ best_play_score
 
-Early V2 results (first 50 episodes): **5.3% ante 2+ rate** vs V1's 1.89% — promising improvement from action space design alone.
+| Metric | V2 (4,200 eps) | V1 (26,400 eps) |
+|--------|----------------|-----------------|
+| Avg reward | **10.5** | 1.61 |
+| Max reward | **128.4** | 62.7 |
+| Ante 2+ rate | **22.3%** | 1.89% |
+| Ante 3+ rate | **12.8%** | 0.67% |
+| Best ante | **7** | 5 |
+
+**V2 is 10× better than V1 with 1/6th the training episodes.**
+
+The pre-ranked action space eliminates the need to learn card combinations from scratch — the agent learns which ranked options to prefer rather than discovering that "these 5 cards make a flush."
+
+![V2 Training Progress](docs/v2_training_progress.png)
+
+**Learned Strategy:**
+- 59% of plays use action 0 (best-ranked hand)
+- 60/40 play/discard ratio
+- Prefers "discard 3 lowest" for clearing weak cards
+- Starts 78% of hands with immediate play vs discard
 
 ---
 
