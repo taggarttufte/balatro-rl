@@ -25,8 +25,8 @@ from balatro_rl.action_v2 import (
 
 # ── Speed configuration ───────────────────────────────────────────────────────
 # Adjust based on Handy mod speed multiplier
-# 1.0 = 32x (default), 0.5 = 64x, 0.25 = 128x
-SPEED_FACTOR = 0.5  # For 64x Handy speed
+# 1.0 = 32x, 0.5 = 64x, 0.32 = 100x, 0.25 = 128x
+SPEED_FACTOR = 0.32  # For 100x Handy speed
 
 # ── Balatro process management ────────────────────────────────────────────────
 
