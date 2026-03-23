@@ -1282,10 +1282,17 @@ love.draw = function()
     local score = game.chips or 0
     local target = game.blind and game.blind.chips or 1
     local progress = math.min(score / target, 1) * 100
+    
+    -- Simple number formatting
+    local function fmt(n)
+        if n >= 1e9 then return string.format("%.1fB", n/1e9)
+        elseif n >= 1e6 then return string.format("%.1fM", n/1e6)
+        elseif n >= 1e3 then return string.format("%.1fK", n/1e3)
+        else return string.format("%.0f", n) end
+    end
+    
     love.graphics.print(string.format("SCORE: %s / %s  (%.0f%%)", 
-        BalatroRL.format_number(score),
-        BalatroRL.format_number(target),
-        progress), x, y)
+        fmt(score), fmt(target), progress), x, y)
     y = y + line_height
     
     -- Progress bar
