@@ -6,6 +6,32 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
 
 ---
 
+## What is Balatro?
+
+[Balatro](https://www.playbalatro.com/) is a roguelike deckbuilder where you play poker hands to score points. Released in 2024, it became an indie hit with 2M+ sales and a 97% Steam rating.
+
+**Gameplay loop:**
+1. Play 5-card poker hands (pairs, flushes, straights, etc.) to score chips
+2. Score enough chips to clear "blinds" (point thresholds)
+3. Clear 3 blinds per "ante" (8 antes total to win)
+4. Between blinds, visit the shop to buy "jokers" — modifiers that multiply your scoring
+5. Joker synergies are key: the right combo can turn a simple pair into millions of points
+
+**Why it's an interesting RL problem:**
+
+| Challenge | Description |
+|-----------|-------------|
+| **Combinatorial action space** | 8 cards in hand → 218 possible play/discard combinations per turn |
+| **Long-horizon credit assignment** | A joker bought in ante 1 might only pay off in ante 6 |
+| **Partial observability** | Agent can't see upcoming blinds, full deck order, or shop contents |
+| **Sparse rewards** | Most hands score 0 progress; only hands that clear blinds matter |
+| **Stochastic elements** | Card draws, joker spawns, and boss blind effects are randomized |
+| **Compounding strategy** | Hand type upgrades, deck thinning, and joker combos interact multiplicatively |
+
+A skilled human can win ~70% of runs. Random play wins <0.01%. The gap represents learnable strategy.
+
+---
+
 ## Overview
 
 The agent controls card play and discard decisions in real time. All game navigation (blind selection, cash out, shop, new run) is handled headlessly by the Lua mod — no mouse or keyboard automation required.
