@@ -159,13 +159,13 @@ V2 addresses V1's ceiling with pre-ranked play/discard options:
 - MaskablePPO from sb3-contrib for action masking
 - Discard reward based on Δ best_play_score
 
-| Metric | V2 (4,200 eps) | V1 (26,400 eps) |
-|--------|----------------|-----------------|
-| Avg reward | **10.5** | 1.61 |
-| Max reward | **128.4** | 62.7 |
-| Ante 2+ rate | **22.3%** | 1.89% |
-| Ante 3+ rate | **12.8%** | 0.67% |
-| Best ante | **7** | 5 |
+| Metric | V2 Last 1k | V2 Overall (4,200 eps) | V1 (26,400 eps) |
+|--------|------------|------------------------|-----------------|
+| Avg reward | **15.2** | 10.5 | 1.61 |
+| Max reward | 127.0 | **128.4** | 62.7 |
+| Ante 2+ rate | **35.5%** | 22.3% | 1.89% |
+| Ante 3+ rate | **19.0%** | 11.7% | 0.67% |
+| Best ante | **8** | **8** | 5 |
 
 **V2 is 10× better than V1 with 1/6th the training episodes.**
 
