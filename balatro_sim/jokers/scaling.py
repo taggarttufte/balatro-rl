@@ -105,7 +105,7 @@ class _GreenJoker:
     def on_hand_scored(self, inst, ctx):
         inst.state["mult"] = inst.state.get("mult", 0) + 1
         ctx.mult += inst.state.get("mult", 0)
-    def on_discard(self, inst, card, ctx):
+    def on_discard(self, inst, cards, ctx):
         inst.state["mult"] = max(0, inst.state.get("mult", 0) - 1)
 JOKER_REGISTRY["j_green_joker"] = _GreenJoker()
 
@@ -239,8 +239,8 @@ class _Ramen:
         inst.state["mult"] = 2.0
     def on_hand_scored(self, inst, ctx):
         ctx.mult_mult *= inst.state.get("mult", 2.0)
-    def on_discard(self, inst, card, ctx):
-        inst.state["mult"] = max(1.0, inst.state.get("mult", 2.0) - 0.01)
+    def on_discard(self, inst, cards, ctx):
+        inst.state["mult"] = max(1.0, inst.state.get("mult", 2.0) - 0.01 * len(cards))
 JOKER_REGISTRY["j_ramen"] = _Ramen()
 
 # ── j_seltzer: retrigger all cards for next 3 hands ─────────────────────────
@@ -253,9 +253,10 @@ class _Castle:
     def on_init(self, inst):
         inst.state["suit"] = _random.choice(self.suits)
         inst.state["chips"] = 0
-    def on_discard(self, inst, card, ctx):
-        if card.suit == inst.state.get("suit"):
-            inst.state["chips"] = inst.state.get("chips", 0) + 3
+    def on_discard(self, inst, cards, ctx):
+        for card in cards:
+            if card.suit == inst.state.get("suit"):
+                inst.state["chips"] = inst.state.get("chips", 0) + 3
     def on_hand_scored(self, inst, ctx):
         ctx.chips += inst.state.get("chips", 0)
     def on_round_end(self, inst, ctx):
@@ -579,7 +580,7 @@ class _Burglar:
     def on_hand_scored(self, inst, ctx):
         inst.state["mult"] = inst.state.get("mult", 0) + 3
         ctx.mult += inst.state["mult"]
-    def on_discard(self, inst, card, ctx):
+    def on_discard(self, inst, cards, ctx):
         inst.state["mult"] = max(0, inst.state.get("mult", 0) - 3)
 JOKER_REGISTRY["j_burglar"] = _Burglar()
 

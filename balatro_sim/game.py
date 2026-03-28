@@ -228,6 +228,13 @@ class BalatroGame:
             effect = JOKER_REGISTRY.get(j.key)
             if effect and hasattr(effect, "on_blind_selected"):
                 effect.on_blind_selected(j, None)
+            # Collect pending consumables / planet upgrades from joker state
+            for item in j.state.pop("pending_consumables", []):
+                if len(self.consumable_hand) < self.consumable_slots:
+                    self.consumable_hand.append(item)
+            if "planet_upgrade" in j.state:
+                ht = j.state.pop("planet_upgrade")
+                self.planet_levels[ht] = self.planet_levels.get(ht, 1) + 1
         self.state = State.SELECTING_HAND
 
     def _apply_boss_start(self, boss_key: str):
@@ -440,13 +447,15 @@ class BalatroGame:
         if not selected:
             return
 
-        # Fire on_discard joker hooks
+        # Fire on_discard joker hooks; collect pending money/consumables
         for j in self.jokers:
             effect = JOKER_REGISTRY.get(j.key)
             if effect and hasattr(effect, "on_discard"):
                 effect.on_discard(j, selected, None)
-            # Collect pending money from discard jokers
             self.dollars += j.state.pop("pending_money", 0)
+            for item in j.state.pop("pending_consumables", []):
+                if len(self.consumable_hand) < self.consumable_slots:
+                    self.consumable_hand.append(item)
 
         for c in selected:
             self.hand.remove(c)
@@ -485,12 +494,15 @@ class BalatroGame:
                     effect.on_boss_beaten(j, None)
             self._undo_boss_debuffs(self.current_blind.boss_key)
 
-        # Fire on_round_end hooks; collect pending money
+        # Fire on_round_end hooks; collect pending money and consumables
         for j in self.jokers:
             effect = JOKER_REGISTRY.get(j.key)
             if effect and hasattr(effect, "on_round_end"):
                 effect.on_round_end(j, None)
             self.dollars += j.state.pop("pending_money", 0)
+            for item in j.state.pop("pending_consumables", []):
+                if len(self.consumable_hand) < self.consumable_slots:
+                    self.consumable_hand.append(item)
 
         # Gold seal: $3 per Gold seal card held in hand
         for c in self.hand:

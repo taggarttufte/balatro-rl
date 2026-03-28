@@ -266,9 +266,10 @@ JOKER_REGISTRY["j_seeing_double"] = _SeeingDouble()
 
 # ── j_hit_the_road: +3 mult per Jack discarded this round ───────────────────
 class _HitTheRoad:
-    def on_discard(self, inst, card, ctx):
-        if card.rank == 11:  # Jack
-            inst.state["mult"] = inst.state.get("mult", 0) + 3
+    def on_discard(self, inst, cards, ctx):
+        for card in cards:
+            if card.rank == 11:  # Jack
+                inst.state["mult"] = inst.state.get("mult", 0) + 3
     def on_hand_scored(self, inst, ctx):
         ctx.mult += inst.state.get("mult", 0)
 JOKER_REGISTRY["j_hit_the_road"] = _HitTheRoad()
@@ -369,8 +370,8 @@ JOKER_REGISTRY["j_triboulet"] = _Triboulet()
 
 # ── j_yorick: +5 mult per 23 cards discarded (deck + 3 copies) ──────────────
 class _Yorick:
-    def on_discard(self, inst, card, ctx):
-        inst.state["discarded"] = inst.state.get("discarded", 0) + 1
+    def on_discard(self, inst, cards, ctx):
+        inst.state["discarded"] = inst.state.get("discarded", 0) + len(cards)
     def on_hand_scored(self, inst, ctx):
         sets = inst.state.get("discarded", 0) // 23
         ctx.mult += 5 * sets

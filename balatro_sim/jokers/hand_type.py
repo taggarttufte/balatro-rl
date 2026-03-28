@@ -20,10 +20,11 @@ from .base import JOKER_REGISTRY, ScoreContext
 
 # ── j_mail_in_rebate: earn $3 per discarded rank, max one rank per round ────
 class _MailInRebate:
-    def on_discard(self, inst, card, ctx):
-        if "rebate_rank" not in inst.state:
-            inst.state["rebate_rank"] = card.rank
-            inst.state["pending_money"] = inst.state.get("pending_money", 0) + 3
+    def on_discard(self, inst, cards, ctx):
+        for card in cards:
+            if "rebate_rank" not in inst.state:
+                inst.state["rebate_rank"] = card.rank
+                inst.state["pending_money"] = inst.state.get("pending_money", 0) + 3
 JOKER_REGISTRY["j_mail_in_rebate"] = _MailInRebate()
 
 # ── j_to_the_moon: already in economy.py ─────────────────────────────────────

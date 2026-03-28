@@ -205,7 +205,7 @@ JOKER_REGISTRY["j_drivers_license"] = _DriversLicense()
 class _Satellite:
     def on_round_end(self, inst, ctx):
         n = len(inst.state.get("planets_used", set()))
-        ctx.pending_money = getattr(ctx, "pending_money", 0) + n
+        inst.state["pending_money"] = inst.state.get("pending_money", 0) + n
     def on_planet_used(self, inst, planet_name, ctx):
         if "planets_used" not in inst.state:
             inst.state["planets_used"] = set()
@@ -215,9 +215,13 @@ JOKER_REGISTRY["j_satellite"] = _Satellite()
 # ── j_cloud_9: +$1 per 9 in full deck at end of round ────────────────────────
 class _Cloud9:
     def on_round_end(self, inst, ctx):
-        # Approximate: count 9s in all_cards (full deck not available here)
-        nines = sum(1 for c in ctx.all_cards if c.rank == 9)
-        ctx.pending_money = getattr(ctx, "pending_money", 0) + nines
+        # Cloud 9 fires at end of round via game.py; track 9s in state
+        nines = inst.state.get("nines_seen", 0)
+        inst.state["pending_money"] = inst.state.get("pending_money", 0) + nines
+        inst.state["nines_seen"] = 0  # reset each round
+    def on_score_card(self, inst, card, ctx):
+        if card.rank == 9 and not card.debuffed:
+            inst.state["nines_seen"] = inst.state.get("nines_seen", 0) + 1
 JOKER_REGISTRY["j_cloud_9"] = _Cloud9()
 
 # ── j_wee (wee joker): +8 chips per 2 scored — already j_wee_joker ──────────
@@ -257,8 +261,9 @@ JOKER_REGISTRY["j_seance"] = _Seance()
 # ── j_riff_raff: when blind selected, create 2 common jokers ────────────────
 class _RiffRaff:
     def on_blind_selected(self, inst, ctx):
-        ctx.pending_consumables.append("common_joker")
-        ctx.pending_consumables.append("common_joker")
+        pc = inst.state.setdefault("pending_consumables", [])
+        pc.append("common_joker")
+        pc.append("common_joker")
 JOKER_REGISTRY["j_riff_raff"] = _RiffRaff()
 
 # ── j_superposition: Tarot if played Straight with Ace ───────────────────────
@@ -290,7 +295,7 @@ JOKER_REGISTRY["j_hallucination"] = _Hallucination()
 # ── j_cartomancer: create 1 Tarot at start of each blind ─────────────────────
 class _Cartomancer:
     def on_blind_selected(self, inst, ctx):
-        ctx.pending_consumables.append("tarot")
+        inst.state.setdefault("pending_consumables", []).append("tarot")
 JOKER_REGISTRY["j_cartomancer"] = _Cartomancer()
 
 # ── j_astronomer: Planet cards cost $0 in shop ───────────────────────────────
@@ -303,8 +308,8 @@ JOKER_REGISTRY["j_astronomer"] = _Astronomer()
 class _BurntJoker:
     def on_blind_selected(self, inst, ctx):
         most_played = inst.state.get("most_played")
-        if most_played and most_played in ctx.planet_levels:
-            ctx.planet_levels[most_played] = ctx.planet_levels.get(most_played, 1) + 1
+        if most_played:
+            inst.state["planet_upgrade"] = most_played  # game.py applies this
     def on_hand_scored(self, inst, ctx):
         # Track most played hand
         counts = inst.state.setdefault("counts", {})
@@ -317,7 +322,7 @@ class _InvisibleJoker:
     def on_round_end(self, inst, ctx):
         inst.state["rounds"] = inst.state.get("rounds", 0) + 1
         if inst.state["rounds"] >= 2:
-            ctx.pending_consumables.append("duplicate_joker")
+            inst.state.setdefault("pending_consumables", []).append("duplicate_joker")
             inst.state["rounds"] = 0
 JOKER_REGISTRY["j_invisible_joker"] = _InvisibleJoker()
 
@@ -340,7 +345,7 @@ JOKER_REGISTRY["j_chicot"] = _Chicot()
 # ── j_matador: earn $8 if Boss Blind ability triggers ────────────────────────
 class _Matador:
     def on_boss_ability_triggered(self, inst, ctx):
-        ctx.pending_money = getattr(ctx, "pending_money", 0) + 8
+        inst.state["pending_money"] = inst.state.get("pending_money", 0) + 8
 JOKER_REGISTRY["j_matador"] = _Matador()
 
 # ── j_luchador: sell this to disable Boss Blind ──────────────────────────────
@@ -362,7 +367,7 @@ JOKER_REGISTRY["j_ring_master"] = _RingMaster()
 # ── j_marble: add 1 Stone card to deck when a Blind is selected ─────────────
 class _Marble:
     def on_blind_selected(self, inst, ctx):
-        ctx.pending_consumables.append("stone_card")
+        inst.state.setdefault("pending_consumables", []).append("stone_card")
 JOKER_REGISTRY["j_marble"] = _Marble()
 
 # ── j_dna: if first hand has 1 card, add permanent copy to deck ─────────────
@@ -387,7 +392,7 @@ class _TradingCard:
         if inst.state.get("used"):
             return
         inst.state["used"] = True
-        ctx.pending_money = getattr(ctx, "pending_money", 0) + 3
+        inst.state["pending_money"] = inst.state.get("pending_money", 0) + 3
         for card in cards:
             if card.is_face_card:
                 card.debuffed = True  # approximate destroy
@@ -461,7 +466,7 @@ JOKER_REGISTRY["j_egg"] = _Egg()
 class _DelayedGrat:
     def on_round_end(self, inst, ctx):
         if not inst.state.get("discarded"):
-            ctx.pending_money = getattr(ctx, "pending_money", 0) + 2
+            inst.state["pending_money"] = inst.state.get("pending_money", 0) + 2
         inst.state["discarded"] = False
     def on_discard(self, inst, cards, ctx):
         inst.state["discarded"] = True
@@ -470,9 +475,9 @@ JOKER_REGISTRY["j_delayed_grat"] = _DelayedGrat()
 # ── j_faceless: earn $5 if 3+ face cards discarded at once ────────────────────
 class _Faceless:
     def on_discard(self, inst, cards, ctx):
-        face_count = sum(1 for c in cards if ctx.is_face_card(c))
+        face_count = sum(1 for c in cards if c.is_face_card)
         if face_count >= 3:
-            ctx.pending_money = getattr(ctx, "pending_money", 0) + 5
+            inst.state["pending_money"] = inst.state.get("pending_money", 0) + 5
 JOKER_REGISTRY["j_faceless"] = _Faceless()
 
 # ── j_to_do_list: earn $4 if played hand matches target; target changes ───────
@@ -499,7 +504,7 @@ JOKER_REGISTRY["j_showman"] = _Showman()
 # ── j_diet_cola: sell to create a free Double Tag ────────────────────────────
 class _DietCola:
     def on_sell(self, inst, ctx):
-        ctx.pending_consumables.append("double_tag")
+        inst.state["pending_consumables"] = inst.state.get("pending_consumables", []) + ["double_tag"]
 JOKER_REGISTRY["j_diet_cola"] = _DietCola()
 
 # ── j_flash: +2 mult per upgrade from Foil/Holo/Poly card played ─────────────
@@ -530,7 +535,7 @@ JOKER_REGISTRY["j_midas_mask"] = _MidasMask()
 # ── j_certificate: when Blind selected, add random card with random enhancement
 class _Certificate:
     def on_blind_selected(self, inst, ctx):
-        ctx.pending_consumables.append("random_enhanced_card")
+        inst.state.setdefault("pending_consumables", []).append("random_enhanced_card")
 JOKER_REGISTRY["j_certificate"] = _Certificate()
 
 # ── j_swashbuckler: already in scaling.py — adds sell value of all jokers as mult
