@@ -150,8 +150,11 @@ class RolloutCollector(threading.Thread):
             self.sync_weights()   # pull latest GPU weights to CPU inference copy
             rollout      = []
             ep_info_cycle = []
+            iter_deadline = time.time() + 120   # 2-min hard cap per thread iteration
 
             for _ in range(self.steps_per_env):
+                if time.time() > iter_deadline:
+                    break  # bail early, use partial rollout
                 mask = env.action_masks()
                 action, log_prob, value = self._get_action(obs, mask)
 
@@ -290,6 +293,8 @@ def train(num_envs: int, num_iterations: int, resume_path: str | None):
 
         for c in collectors:
             r = c.rollout
+            if len(r) == 0:
+                continue  # skip empty rollouts from timed-out threads
             rewards   = np.array([s["reward"]   for s in r], dtype=np.float32)
             values    = np.array([s["value"]     for s in r], dtype=np.float32)
             dones     = np.array([s["done"]      for s in r], dtype=np.float32)
