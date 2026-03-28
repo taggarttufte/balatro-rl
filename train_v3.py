@@ -203,6 +203,7 @@ def ppo_update(policy: ActorCritic, optimizer: optim.Optimizer,
     mask_b = torch.BoolTensor(mask_b).to(device)
 
     adv_b = (adv_b - adv_b.mean()) / (adv_b.std() + 1e-8)
+    ret_b = (ret_b - ret_b.mean()) / (ret_b.std() + 1e-8)  # normalize returns to stabilize VF loss
 
     total_loss = pg_loss = vf_loss = ent_loss = 0.0
     n_batches  = 0
