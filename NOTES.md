@@ -349,3 +349,155 @@ Implement V3 simple first. Only pursue learned comm if simple version plateaus a
 - PPO entropy bonus already handles exploration implicitly
 - Adding a passive exploration slot to the action array does nothing useful ï¿½ agent never picks it if policy thinks it's suboptimal
 - If policy collapse becomes an issue, simplest fix is keeping entropy_coef higher for longer rather than adding explicit epsilon-greedy
+
+---
+
+## v3 Socket IPC + Ray Training Attempt — 2026-03-27
+
+### Goal
+Replace file-based IPC (polling) with TCP socket IPC for lower latency and higher throughput.
+Target: ~94 steps/sec across 8 instances (vs v2 parallel's ~6 steps/sec — ~16x improvement).
+
+---
+
+### Phase 1: v2 Parallel Baseline (Confirmed Working)
+- 8 instances, file IPC, 64x game speed, Ray PPO (old API stack)
+- Throughput: ~6 steps/sec total (~2,500 steps/hour)
+- Run `brisk-canyon`: reached Ante 5 by episode 279, ~41k steps by pause point
+- Critical bug fixed: at 64x speed, Lua writes game_over then immediately starts new game,
+  overwriting state.json before Python polls. Fix: track episode_seed; new seed = terminal.
+
+---
+
+### Phase 2: Socket IPC Development (Instance 9 Isolated)
+
+**Bugs hit during setup:**
+- Mod loader uses %APPDATA%\Balatro\Mods\ not local game folder
+- v3 mod had same ID as v2 -> SMODS silently skipped it. Fix: unique ID BalatroRL_v3
+- LOVE filesystem not ready at module load -> socket_init() deferred to game.update
+- Lua bind("*") on Windows only binds IPv6. Python must connect via ::1
+- Python sent key "cards" but Lua expected "card_indices" -> actions silently failed
+- G.GAME.seed always nil in Balatro -> removed seed-based reset detection
+
+**Result:** Validated end-to-end. 3 episodes (210, 154, 97 steps), all terminated correctly.
+
+---
+
+### Phase 3: Benchmark Results
+
+Socket IPC vs File IPC at 64x game speed (10 episodes each):
+- Socket: 6.1 steps/sec, 91 steps/episode
+- File:   1.8 steps/sec, 20 steps/episode
+- Socket is 3.31x faster
+
+128x validation (single instance):
+- 64x: 6.1 steps/sec -> 128x: 11.7 steps/sec (linear scaling confirmed)
+
+---
+
+### Phase 4: Deploy v3 to All 8 Instances
+- Dynamic port: 5000 + INSTANCE_ID -> ports 5001-5008
+- All 8 instances confirmed listening at 128x game speed
+- v2 file mod disabled on instances 1-8
+
+---
+
+### Phase 5: Ray Training — Full Bug Log (FAILED)
+
+Every bug below was found, fixed, and immediately revealed the next one.
+The 1-env debug test (debug_ray.py) worked: 96 steps across 3 iterations (~135s/iter).
+8-env training never produced usable throughput.
+
+**Bug 1 — keep_fresh flooding TCP buffer**
+Lua sent state every game.update tick while in SELECTING_HAND. Python busy during
+training -> buffer filled -> send timeout -> Lua dropped connection.
+Fix: Removed keep_fresh entirely.
+
+**Bug 2 — Regex broke underscore action names**
+Pattern (%a+) stops at underscores. "new_run" parsed as "new", "leave_shop" as "leave".
+Actions silently fell through to wrong handler.
+Fix: Changed to ([%a_]+).
+
+**Bug 3 — No initial state on connect (after removing keep_fresh)**
+Python's reset() waited 60 seconds then returned zero observation.
+Fix: _send_on_connect flag. On the tick after Python connects, send current state.
+
+**Bug 4 — _send_after_action fired before action executed**
+G.E_MANAGER processes events next frame, not same tick. Python received stale state,
+then received actual post-action state -> buffer overflow / confusion.
+Fix: Removed _send_after_action entirely.
+- Play actions: G.STATE transitions (SELECTING_HAND->HAND_PLAYED->...->SELECTING_HAND) trigger send
+- Discard actions: track _prev_discards; send "selecting_hand" when discards_left decreases
+
+**Bug 5 — Wrong Ray metric key**
+Logged num_env_steps_sampled_lifetime but old Ray API returns timesteps_total.
+Fix: Updated key in train_ray_socket.py.
+
+**Bug 6 — Stale sock_client in Lua after Python killed**
+When training was killed and restarted, Lua held a dead connection. New Python
+connection refused (Lua thought it was still connected).
+Fix: reset() always disconnects before reconnecting.
+
+**Bug 7 — Fragile dead-connection check (reverted)**
+Added receive(0) in socket_try_accept() to detect dead connection. Was consuming
+buffered data, causing issues. Reverted to simple if sock_client then return end check.
+
+**Bug 8 — Wrong discard detection field**
+Checked G.GAME.round_resets.discards (never changes mid-round).
+Should be G.GAME.current_round.discards_left.
+Fix: Updated field name.
+
+**Bug 9 — Invalid actions time out at 60 seconds**
+Random policy takes "discard" when discards_left=0. execute_action guard returns
+immediately, no state change -> Python waits 60 seconds for a response that never comes.
+Fix: 4-tick fallback timer in Lua. If no state sent after 4 game.update ticks (~200ms),
+send current state as fallback.
+
+**Bug 10 — Always-reconnect causing connection churn**
+reset() disconnected/reconnected every episode. 8 envs constantly cycling connections
+-> Lua overwhelmed.
+Fix: Persistent connection. Connect once in __init__, only reconnect on actual drop.
+
+**After ALL fixes: still 0.06-0.07 steps/sec (vs target ~94 steps/sec)**
+
+---
+
+### Root Cause: Ray VectorEnv is Inherently Sequential
+
+Ray's old API VectorEnv (required — new API hangs on init, known Ray bug) steps all
+8 envs one at a time in a single thread. Even at 90ms/step:
+  8 sequential envs = 11.7 steps/sec total (same as 1 env — no parallelism gained)
+
+With rollout_fragment_length=128 and ~15s/step observed:
+  128 x 15s = 1920s > sample_timeout=600 -> "no samples" warning -> training hangs
+
+Tried: fragment_length=16, sample_timeout=3600. Still 0.06 steps/sec.
+
+Ray adds nothing on a single machine (no multi-machine distribution needed here).
+The infrastructure overhead dominates everything else.
+
+---
+
+### Decision: Custom Threaded Training Loop
+
+Why it beats Ray even in the theoretical best case:
+- Ray VectorEnv (old API): sequential -> 11.7 steps/sec total regardless of env count
+- Custom loop, 8 threads: GIL releases on socket recv -> true concurrency
+  -> 8 x 11.7 = ~90 steps/sec (the original design goal)
+
+Implementation plan: ~200 lines of PyTorch PPO, one thread per env, shared experience buffer.
+
+---
+
+### What Is Confirmed Working
+- Socket IPC protocol (TCP, IPv6, newline-delimited JSON)
+- All 8 instances with dynamic ports 5001-5008 at 128x game speed
+- G.STATE transition-based state sending (play actions)
+- Fallback timer for invalid/stuck actions
+- Persistent connections
+- 1-env training end-to-end (debug_ray.py)
+
+### What Never Worked
+- Ray with 8 envs: always 0.06-0.07 steps/sec regardless of fixes applied
+- Ray new API stack: hangs on init (upstream Ray bug #53727)
+- Ray callbacks: incompatible with old API stack
