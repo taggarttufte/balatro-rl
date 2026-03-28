@@ -56,6 +56,7 @@ except ImportError:
 
 from .game import BalatroGame, State
 from .hand_eval import evaluate_hand
+from .scoring import score_hand
 from .constants import (
     SUITS, RANK_CHIPS,
     STARTING_HANDS, STARTING_DISCARDS, HAND_SIZE,
@@ -404,15 +405,29 @@ class BalatroSimEnv(gym.Env):
         scored: list[tuple] = []
 
         # Enumerate all k=1..5 card subsets
+        gs = self.game
         for k in range(1, min(6, n+1)):
             for combo in itertools.combinations(range(n), k):
                 cards = [hand[i] for i in combo]
                 try:
-                    hand_type, _ = evaluate_hand(cards)
+                    hand_type, scoring_cards = evaluate_hand(cards)
                     priority = HAND_PRIORITY.get(hand_type, 0)
-                    # Tiebreak by sum of ranks
-                    rank_sum = sum(c.rank for c in cards)
-                    scored.append((priority, rank_sum, list(combo)))
+                    # Tiebreak by actual score (accounts for jokers, planet levels,
+                    # card enhancements/editions). Changed from rank_sum tiebreak
+                    # at run 2 start (~4.1M total steps, 2026-03-28 17:43 MDT).
+                    actual_score, _ = score_hand(
+                        scoring_cards=scoring_cards,
+                        all_cards=cards,
+                        hand_type=hand_type,
+                        jokers=gs.jokers,
+                        planet_levels=gs.planet_levels,
+                        hands_left=gs.hands_left,
+                        discards_left=gs.discards_left,
+                        dollars=gs.dollars,
+                        ante=gs.ante,
+                        deck_remaining=len(gs.deck),
+                    )
+                    scored.append((priority, actual_score, list(combo)))
                 except Exception:
                     pass
 
