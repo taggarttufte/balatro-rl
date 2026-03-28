@@ -12,28 +12,28 @@ class _Greedy:
     def on_score_card(self, inst, card, ctx):
         if card.suit == "Diamonds" and not card.debuffed:
             ctx.mult += 3
-JOKER_REGISTRY["j_greedy"] = _Greedy()
+JOKER_REGISTRY["j_greedy"] = JOKER_REGISTRY["j_greedy_joker"] = _Greedy()
 
-# ── j_lusty: scored cards with Heart suit give +3 mult ───────────────────────
+# ── j_lusty_joker: scored cards with Heart suit give +3 mult ─────────────────
 class _Lusty:
     def on_score_card(self, inst, card, ctx):
         if card.suit == "Hearts" and not card.debuffed:
             ctx.mult += 3
-JOKER_REGISTRY["j_lusty"] = _Lusty()
+JOKER_REGISTRY["j_lusty"] = JOKER_REGISTRY["j_lusty_joker"] = _Lusty()
 
-# ── j_wrathful: scored cards with Spade suit give +3 mult ────────────────────
+# ── j_wrathful_joker: scored cards with Spade suit give +3 mult ──────────────
 class _Wrathful:
     def on_score_card(self, inst, card, ctx):
         if card.suit == "Spades" and not card.debuffed:
             ctx.mult += 3
-JOKER_REGISTRY["j_wrathful"] = _Wrathful()
+JOKER_REGISTRY["j_wrathful"] = JOKER_REGISTRY["j_wrathful_joker"] = _Wrathful()
 
-# ── j_gluttonous: scored cards with Club suit give +3 mult ───────────────────
+# ── j_gluttonous_joker: scored cards with Club suit give +3 mult ─────────────
 class _Gluttonous:
     def on_score_card(self, inst, card, ctx):
         if card.suit == "Clubs" and not card.debuffed:
             ctx.mult += 3
-JOKER_REGISTRY["j_gluttonous"] = _Gluttonous()
+JOKER_REGISTRY["j_gluttonous"] = JOKER_REGISTRY["j_gluttonous_joker"] = _Gluttonous()
 
 # ── j_jolly: +8 mult if hand contains a Pair ────────────────────────────────
 class _Jolly:
