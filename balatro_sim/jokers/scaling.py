@@ -628,7 +628,7 @@ JOKER_REGISTRY["j_blue_joker"] = _BlueJoker()
 
 # ── j_constellation: x0.1 mult per Planet card used ─────────────────────────
 class _Constellation:
-    def on_planet_used(self, inst, ctx):
+    def on_planet_used(self, inst, planet_name):
         inst.state["mult"] = inst.state.get("mult", 1.0) + 0.1
     def on_hand_scored(self, inst, ctx):
         ctx.mult_mult *= inst.state.get("mult", 1.0)

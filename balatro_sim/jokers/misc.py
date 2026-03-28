@@ -206,7 +206,7 @@ class _Satellite:
     def on_round_end(self, inst, ctx):
         n = len(inst.state.get("planets_used", set()))
         inst.state["pending_money"] = inst.state.get("pending_money", 0) + n
-    def on_planet_used(self, inst, planet_name, ctx):
+    def on_planet_used(self, inst, planet_name):
         if "planets_used" not in inst.state:
             inst.state["planets_used"] = set()
         inst.state["planets_used"].add(planet_name)

@@ -61,7 +61,7 @@ def apply_planet(game: "BalatroGame", planet_key: str) -> bool:
     for j in game.jokers:
         effect = _get_effect(j.key)
         if effect and hasattr(effect, "on_planet_used"):
-            effect.on_planet_used(j, planet_key, None)
+            effect.on_planet_used(j, planet_key)
     # Track for Fortune Teller / Constellation
     game.planets_used.append(planet_key)
     return True
