@@ -100,14 +100,108 @@ Expected throughput: ~90 steps/sec (8 × 11.7 steps/sec per instance at 128x gam
 
 ---
 
-## Results Summary
+## Development History
 
-| Version | Episodes | Timesteps | Ante 2+ Rate | Best Ante |
-|---------|----------|-----------|--------------|-----------|
-| V1 (MultiBinary, single) | 26,412 | 376k | 1.89% | 5 |
-| V2 single (Discrete20, single) | 9,073 | ~210k | **60.4%** at 8.7k eps | 9 |
-| V2 parallel (Ray, 8-env) | ~41k steps | ~41k | — (paused early) | 5 by ep 279 |
-| V3 (socket, custom loop) | in progress | — | — | — |
+### Throughput Evolution
+
+Each version iterated on IPC method, training framework, and parallelism. The chart below
+shows how steps/sec improved from the initial prototype to v3.
+
+```
+Steps/sec
+  140 |                                              ████  ← v3 (8-env, actual)
+      |                                              ████
+      |                                              ████
+   94 |                                         ███████  ← v3 (8-env, theoretical)
+      |                                         ███████
+      |                                         ███████
+   42 |                              ████████████████
+      |                              ████████████████  ← v3 (1-env, 128x)
+   22 |                    ██████████████████████████
+      |                    ██████████████████████████  ← v3 (1-env, 64x) = v2 parallel
+    6 |         ███████████████████████████████████████
+      |         ███████████████████████████████████████  ← v2 parallel (Ray, 8-env, file IPC)
+  0.5 |  ████
+      |  ████  ← v2 single (file IPC, 1-env)
+ 0.05 | █
+      | █  ← v1 (file IPC, 1-env)
+      └──────────────────────────────────────────────
+        v1    v2s   v2p   v3-1x  v3-1x  v3-8x  v3-8x
+                         64x    128x   theo   actual
+```
+
+| Version | IPC | Framework | Envs | Speed | Steps/sec | Steps/hour | Speedup vs v1 |
+|---------|-----|-----------|------|-------|-----------|------------|---------------|
+| V1 | File poll | SB3 MaskablePPO | 1 | 64x | ~0.08 | ~300 | 1x |
+| V2 single | File poll | SB3 MaskablePPO | 1 | 64x | ~0.5 | ~1,800 | ~6x |
+| V2 parallel | File poll | Ray PPO (old API) | 8 | 64x | ~6 | ~21,600 | ~70x |
+| V3 socket | TCP socket | Custom threaded PPO | 1 | 64x | ~6.1 | ~22,000 | ~70x |
+| V3 socket | TCP socket | Custom threaded PPO | 1 | 128x | ~11.7 | ~42,000 | ~140x |
+| **V3 socket** | **TCP socket** | **Custom threaded PPO** | **8** | **64x** | **~39** | **~140,000** | **~470x** |
+
+> V3 single-env socket matches v2 parallel throughput. The 6.5x gain over v2 parallel comes entirely
+> from true threading — Ray's VectorEnv was sequential (no actual parallelism), our custom
+> 8-thread loop is not.
+
+---
+
+### Architecture Evolution
+
+| | V1 | V2 | V3 |
+|-|----|----|-----|
+| **Action space** | MultiBinary(9) — agent sets 9 card-selection bits | Discrete(20) — Lua pre-ranks, agent picks index | Discrete(20) — same |
+| **Obs features** | 119 | 119 | 206 (adds play/discard option embeddings) |
+| **IPC** | File poll (50ms) | File poll (50ms) | TCP socket (event-driven) |
+| **IPC latency** | ~50ms + fs delay | ~50ms + fs delay | ~1ms (synchronous) |
+| **IPC reliability** | Drops steps under load | Drops steps under load | Every action acknowledged |
+| **Training** | SB3 MaskablePPO | SB3 MaskablePPO | Custom threaded PPO (PyTorch) |
+| **Parallelism** | None | None → Ray (sequential) | 8 threads, true I/O concurrency |
+| **Inference device** | CPU | CPU | CPU per thread (GPU for PPO batch updates) |
+| **Game speed** | 64x | 64x | 64x (CPU-bottlenecked at 8 envs) |
+
+#### Why each change was made
+
+**MultiBinary → Discrete(20):**
+V1's action space required the agent to learn card combination evaluation from scratch.
+Discrete(20) offloads that to Lua: the game pre-ranks all ~2¹⁸ valid combinations and
+returns the top 10 plays + top 10 discards. Agent just picks one. This alone drove ante2+
+rate from ~1.9% to ~60.4%.
+
+**File IPC → Socket IPC:**
+File-based IPC was fundamentally unreliable: at 64x game speed, Lua sometimes advanced
+multiple game states before Python could poll, silently dropping steps. Socket IPC is
+synchronous — Lua waits for Python's response before proceeding. Benchmark showed
+3.31x speedup at identical game speed, and episode length grew from ~20 to ~90 steps
+(fewer dropped actions = richer episodes).
+
+**SB3/Ray → Custom threaded PPO:**
+Ray's VectorEnv (old API stack) steps all environments sequentially in a single thread —
+8 envs produce the same throughput as 1 env. Custom Python threading releases the GIL
+during socket `recv()`, giving true I/O concurrency across 8 game instances.
+CUDA threading issues (NaN from concurrent kernel execution) solved by per-thread CPU
+inference with periodic GPU weight sync; CUDA reserved for batch PPO updates.
+
+---
+
+### Results by Version
+
+| Version | Steps | Episodes | Ante 2+ Rate | Best Ante | Notes |
+|---------|-------|----------|--------------|-----------|-------|
+| V1 | ~376k | 26,412 | 1.89% | 5 | MultiBinary bottleneck; most runs end at Small Blind |
+| V2 single | ~210k | 9,073 | **60.4%** *(at 8.7k eps)* | 9 | Discrete(20) key change; plateaued ~60% |
+| V2 parallel | ~41k | — | — | 5 *(by ep 279)* | Paused to build v3; was on trajectory |
+| **V3** | in progress | — | — | — | Socket IPC + custom PPO; running now |
+
+**V2 blind-level breakdown** (at 8,732 episodes, confirmed reference point):
+
+| Blind | Survival rate |
+|-------|--------------|
+| Small Blind | 40% — primary bottleneck |
+| Big Blind | ~100% (if Small cleared) |
+| Boss Blind | ~60% |
+
+Small Blind is where ~60% of runs die. Agent learned Big Blind is nearly free but
+struggles to build a joker combo strong enough to survive Boss Blind consistently.
 
 See `V1_RESULTS.md`, `V2_SINGLE_RESULTS.md`, `V2_PARALLEL_RESULTS.md` for full details.
 
