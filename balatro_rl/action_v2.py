@@ -34,13 +34,21 @@ def generate_action_mask(gs: GameState) -> np.ndarray:
     # Play options (indices 0-9)
     if gs.hands_left > 0:
         for i in range(min(10, len(gs.play_options))):
-            if gs.play_options[i].is_valid:
+            # If option exists, it's valid (is_valid field optional for socket IPC)
+            if hasattr(gs.play_options[i], 'is_valid'):
+                if gs.play_options[i].is_valid:
+                    mask[i] = True
+            else:
                 mask[i] = True
     
     # Discard options (indices 10-19)
     if gs.discards_left > 0:
         for i in range(min(10, len(gs.discard_options))):
-            if gs.discard_options[i].is_valid:
+            # If option exists, it's valid (is_valid field optional for socket IPC)
+            if hasattr(gs.discard_options[i], 'is_valid'):
+                if gs.discard_options[i].is_valid:
+                    mask[10 + i] = True
+            else:
                 mask[10 + i] = True
     
     # Ensure at least one action is valid (fallback to first play if nothing else)
