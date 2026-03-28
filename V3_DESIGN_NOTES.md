@@ -1,206 +1,132 @@
-# V3 Design Notes — Shop Agent + Enhanced Communication
+# V3 Design Notes — Socket IPC + Custom Threaded Training Loop
 
-*Notes from 2026-03-23 planning session*
+*Socket IPC developed 2026-03-27. Ray abandoned same day. Custom training loop: next.*
+
+---
 
 ## Overview
 
-V3 introduces a **shop agent** that makes strategic purchasing decisions, communicating with the existing play agent to build coherent strategies.
+V3 replaces file-based IPC with TCP socket IPC and replaces Ray RLlib with a custom
+threaded PPO training loop. Action/observation space is unchanged from V2 (Discrete(20),
+206-feature obs). The gain is throughput: ~90 steps/sec vs v2 parallel's ~6 steps/sec.
 
 ---
 
-## Architecture
+## Why We Moved Away From File IPC + Ray
 
-### Two-Agent System
+**File IPC problems:**
+- Polling introduces latency (50ms minimum round-trip)
+- File writes can be missed at high game speeds (64x+)
+- 3.31x slower than socket IPC at identical game speed
 
-```
-┌─────────────────┐         message (16-dim latent + interpretable heads)
-│   Shop Agent    │ ──────────────────────────────────────────────────────┐
-│                 │                                                        │
-│ shop_obs → encoder → action + message                                    │
-└─────────────────┘                                                        ▼
-                                                                    ┌──────────────┐
-                                                                    │  Play Agent  │
-                                                                    │   (V2 base)  │
-                                                                    │ play_obs + message → action
-                                                                    └──────────────┘
-```
-
-### Communication: Hybrid Approach
-
-**Continuous latent (16-dim):**
-- Rich, emergent communication
-- Can encode nuanced mixed strategies
-- Learns what's useful to communicate
-
-**Interpretable heads (auxiliary outputs):**
-- `target_hand_type` — 12-way softmax (flush, pairs, straight, etc.)
-- `economy_priority` — 0.0-1.0 (how much to optimize for money)
-- `build_confidence` — 0.0-1.0 (how committed to current strategy)
-- `aggression` — 0.0-1.0 (risk tolerance)
-
-**Benefits:**
-- Latent handles nuance explicit heads can't express
-- Explicit heads enable debugging and analysis
-- Can train auxiliary losses on explicit predictions
+**Ray problems:**
+- New API stack hangs on init (upstream Ray bug #53727)
+- Old API VectorEnv steps all envs sequentially in one thread — no parallelism gained
+- 8 envs sequential at best = 11.7 steps/sec total (same as 1 env)
+- Sample timeout (600s) exceeded with 8 envs under normal step times
+- After 10 bugs fixed over a full day, still stuck at 0.06-0.07 steps/sec
 
 ---
 
-## Shop Agent Action Space
+## Socket IPC Protocol
 
-### V3a — Simple (recommended starting point)
+- **Transport:** TCP, IPv6 (Lua's `bind("*")` on Windows binds IPv6 only)
+- **Format:** Newline-delimited JSON (`{"event": "selecting_hand", ...}\n`)
+- **Ports:** 5000 + INSTANCE_ID → ports 5001-5008 for instances 1-8
+- **Roles:** Lua = server, Python = client
+- **Connection:** Persistent — connect once in `__init__`, reconnect only on drop
 
-```
-Actions (14):
-├── buy_joker_1
-├── buy_joker_2
-├── buy_booster_1
-├── buy_booster_2
-├── buy_voucher
-├── sell_joker_1..5 (5 actions)
-├── reroll
-└── leave_shop
-```
+### State Send Protocol (no keep_fresh)
+State is only sent on meaningful events — no continuous polling:
+- **On connect:** Send current state immediately (`_send_on_connect` flag)
+- **Play action:** G.STATE transitions fire naturally (SELECTING_HAND → HAND_PLAYED → ... → SELECTING_HAND)
+- **Discard action:** Track `_prev_discards`; send when `current_round.discards_left` decreases
+- **Fallback:** If no state sent within 4 game.update ticks (~200ms), send current state
+  (handles invalid actions from random policy — e.g. discard when discards_left=0)
 
-- Auto-use consumables (heuristic)
-- Auto-pick from booster packs (heuristic)
+### Validated Performance
+| Config | Steps/sec |
+|--------|-----------|
+| Socket, 64x, 1 env | 6.1 |
+| Socket, 128x, 1 env | 11.7 |
+| Socket, 128x, 8 envs (target) | ~90 |
+| File IPC, 64x, 1 env | 1.8 |
 
-### V3b — Full (future expansion)
-
-```
-Additional actions (~30 more):
-├── use_consumable_1..2
-├── target_card_1..8 (for Tarot effects)
-├── target_hand_type_1..12 (for Planet cards)
-└── booster_pick_1..5
-```
+Linear scaling confirmed: 64x → 128x = 2x throughput. No timing issues.
 
 ---
 
-## Enhanced Observations (for Play Agent)
+## Custom Threaded PPO Training Loop
 
-### Suit Distribution (8 features)
-```python
-hearts_in_hand, diamonds_in_hand, clubs_in_hand, spades_in_hand
-hearts_in_deck, diamonds_in_deck, clubs_in_deck, spades_in_deck
+### Why Custom vs Ray
+Ray's VectorEnv is sequential — 8 envs gain nothing over 1 env in throughput.
+Python's GIL releases during socket `recv()` calls (I/O), so threads genuinely overlap.
+8 threads × 11.7 steps/sec = ~90 steps/sec actual concurrency.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Training Process                      │
+│                                                          │
+│  Thread 1: Env 1 (port 5001) ──→ experience queue       │
+│  Thread 2: Env 2 (port 5002) ──→ experience queue       │
+│  ...                                                     │
+│  Thread 8: Env 8 (port 5008) ──→ experience queue       │
+│                                                          │
+│  Main thread: drain queue → PPO update (PyTorch)        │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### Hand Potential (6 features)
-```python
-cards_to_flush       # 5 - max_same_suit
-cards_to_straight    # Cards needed to complete
-flush_draw           # 1 if 4-flush
-straight_draw        # 1 if open-ended
-max_of_a_kind        # 2=pair, 3=trips, 4=quads
-best_hand_score      # Estimated score of best current hand
-```
+### Implementation Plan (~200 lines PyTorch)
 
-### Joker Synergy Flags (~15 features)
-```python
-has_flush_joker, has_pair_joker, has_straight_joker
-has_face_card_joker, has_suit_bonus
-target_suit          # Which suit is buffed (0-3, -1 if none)
-money_per_hand       # Expected $ generation per hand
-money_per_discard    # Expected $ generation per discard
-```
+**Rollout collector (per thread):**
+- Step env, store (obs, action, reward, done, log_prob, value) tuples
+- On episode end: reset(), continue
+- Fill until batch_size / num_envs steps collected, then push to shared queue
+
+**PPO update (main thread):**
+- Pull batch from queue when full
+- Compute advantages (GAE)
+- Run N epochs of minibatch gradient updates
+- Log metrics, save checkpoint
+
+**Hyperparameters (carry over from V2):**
+- `batch_size=2048`, `minibatch_size=64`, `n_epochs=10`
+- `lr=3e-4`, `gamma=0.99`, `lambda=0.95`
+- `clip_param=0.2`, `entropy_coeff=0.01`
 
 ---
 
-## Transfer Learning from V2
+## Files
 
-### Recommended Approach: Expand & Transfer
+| File | Purpose |
+|------|---------|
+| `balatro_rl/env_socket.py` | Gymnasium env with socket IPC (validated) |
+| `BalatroRL_v3.lua` | Lua socket server mod (all 8 instances, 128x speed) |
+| `train_v3.py` | Custom threaded PPO training loop (to be written) |
+| `train_ray_socket.py` | Ray attempt (abandoned, kept for reference) |
+| `debug_ray.py` | 1-env Ray diagnostic (kept for reference) |
 
-```
-V2: obs(206) → [256,256,128] → actions(20)
-V3: obs(206+new) → [256,256,128+new] → actions(20+shop_msg)
-```
-
-1. Copy V2 weights for overlapping parts
-2. Initialize new neurons near zero
-3. Train with lower LR initially (0.5x)
-4. Gradually unfreeze V2 weights
-
----
-
-## Advanced: Privileged Learning for Complex Strategies
-
-### The Consumable Blocking Strategy
-
-High-level play: Hold Tarot cards to block duplicates from packs.
-
-**Problem:** Very delayed reward (20+ turns between hold and pack pull)
-
-**Solution:** Privileged training observations
-
-| Phase | Training % | Privileged Obs |
-|-------|------------|----------------|
-| Phase 1 | 0-70% | Full block info ("you blocked X, got Y") |
-| Phase 2 | 70-90% | Annealing (gradually zero out) |
-| Phase 3 | 90-100% | Human-equivalent only |
-
-```python
-if training_progress < 0.7:
-    obs['block_info'] = actual_block_info
-elif training_progress < 0.9:
-    mask = random() > (training_progress - 0.7) / 0.2
-    obs['block_info'] = actual_block_info if mask else zeros
-else:
-    obs['block_info'] = zeros  # Fair deployment
-```
-
-**Deployment:** Remove privileged observations for fair human comparison.
+**Lua mod location (all instances):**
+`C:\Users\Taggart\AppData\Roaming\Balatro\Mods\BalatroRL_v3\BalatroRL_v3.lua`
 
 ---
 
-## Money/Economy Communication
+## Instance Setup
 
-Shop agent can signal "we need money" through:
-
-1. **Implicit:** Buying money-generating jokers (Golden Joker, To the Moon)
-2. **Explicit:** `economy_priority` interpretable head
-3. **Latent:** Learned encoding in 16-dim message
-
-Play agent learns: "When I have money jokers + high economy signal → optimize for $ generation"
+- 8 Balatro instances, 128x game speed
+- Ports 5001-5008, IPv6, all listening at startup
+- Instance 1: Steam install (`C:\Program Files (x86)\Steam\...`)
+- Instances 2-8: `C:\BalatroParallel\Balatro_N\`
+- Launch script: `launch_parallel.ps1`
 
 ---
 
-## Training Considerations
+## Current Status (2026-03-27)
 
-### Shared Reward
-- Both agents receive same game outcome reward
-- Encourages cooperation, not competition
-
-### Auxiliary Losses
-- Predict pack outcomes from shop decisions
-- Predict hand type distribution from current jokers
-- Predict win probability from current state
-
-### Preventing Communication Collapse
-- Add small noise to message during training
-- Information bottleneck on latent size
-- Auxiliary loss: reconstruct message → useful signal
-
----
-
-## Roadmap
-
-```
-V2 (current): Play agent only, auto-shop
-    ↓
-V3a: Simple shop agent (buy/sell/skip), transfer V2 weights
-    ↓
-V3b: Add consumable usage, booster selection
-    ↓
-V4: Enhanced play observations (deck composition, draw odds)
-    ↓
-V5: Privileged learning for advanced strategies (blocking, etc.)
-```
-
----
-
-## Key Insights
-
-1. **Shop agent is the biggest unlock** — enables coherent build strategies
-2. **Implicit communication via jokers works** — but explicit channel is richer
-3. **Hybrid communication (latent + interpretable)** — best of both worlds
-4. **Transfer learning preserves V2 progress** — don't start from scratch
-5. **Privileged learning for complex strategies** — train with extra info, deploy without
+- Socket IPC: fully validated (3 episodes, all transitions correct)
+- Lua mod: deployed to all 8 instances, all bugs fixed
+- env_socket.py: persistent connection, fallback timer, discard detection — all working
+- Ray: abandoned after full-day debugging (see NOTES.md for complete bug log)
+- train_v3.py: not yet written — next step
