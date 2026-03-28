@@ -115,7 +115,7 @@ class RolloutCollector(threading.Thread):
 
         self.rollout      = []   # populated each cycle
         self.next_value   = 0.0  # bootstrap value for GAE
-        self.episode_info = []   # (steps, ante, reward) per completed episode in this cycle
+        self.episode_info = []   # (steps, ante, reward, blind_name, blind_boss) per completed episode
 
     def sync_weights(self):
         """Copy current GPU policy weights to this thread's CPU inference policy."""
@@ -171,8 +171,10 @@ class RolloutCollector(threading.Thread):
                 })
 
                 if done:
-                    ante = info.get("ante", info.get("ante_reached", 1))
-                    ep_info_cycle.append((ep_steps, ante, ep_reward))
+                    ante       = info.get("ante", 1)
+                    blind_name = info.get("blind_name", "unknown")
+                    blind_boss = info.get("blind_boss", False)
+                    ep_info_cycle.append((ep_steps, ante, ep_reward, blind_name, blind_boss))
                     obs, _ = env.reset()
                     ep_steps  = 0
                     ep_reward = 0.0
@@ -333,7 +335,7 @@ def train(num_envs: int, num_iterations: int, resume_path: str | None):
         eps      = len(iter_episodes)
         eps_hr   = eps / max(iter_sec / 3600.0, 1e-9)
 
-        iter_best = max((a for _, a, _ in iter_episodes), default=0)
+        iter_best = max((a for _, a, _, _b, _bb in iter_episodes), default=0)
         if iter_best > best_ante:
             best_ante = iter_best
             tag = f"[NEW BEST] Ante {best_ante}"
@@ -353,8 +355,15 @@ def train(num_envs: int, num_iterations: int, resume_path: str | None):
             f.write(status + "\n")
 
         episode_log.extend([
-            {"iteration": iteration + 1, "steps": s, "ante": a, "reward": r}
-            for s, a, r in iter_episodes
+            {
+                "iteration":  iteration + 1,
+                "steps":      s,
+                "ante":       a,
+                "reward":     r,
+                "died_at":    blind_name,
+                "was_boss":   blind_boss,
+            }
+            for s, a, r, blind_name, blind_boss in iter_episodes
         ])
 
         # ── checkpoint every 10 iters ────────────────────────────────────────

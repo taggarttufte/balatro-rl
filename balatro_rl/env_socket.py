@@ -209,36 +209,64 @@ class BalatroSocketEnv(gym.Env):
             terminated = True
             terminal_reason = "missed_terminal"
 
-        obs = state_to_obs(parse_state(gs))
-        reward = self._compute_reward(gs, terminated)
-        info = {
-            "ante": gs.get("ante", 1),
-            "seed": gs.get("seed"),
-            "event": gs.get("event"),
+        obs    = state_to_obs(parse_state(gs))
+        reward = self._compute_reward(gs, pre_gs, action_type)
+        info   = {
+            "ante":       gs.get("ante", 1),
+            "round":      gs.get("round", 0),
+            "blind_name": gs.get("blind_name", "unknown"),
+            "blind_boss": gs.get("blind_boss", False),
+            "seed":       gs.get("seed"),
+            "event":      gs.get("event"),
         }
         if terminal_reason:
             info["terminal_reason"] = terminal_reason
 
         return obs, reward, terminated, False, info
 
-    def _compute_reward(self, gs: dict, terminated: bool) -> float:
-        ante      = gs.get("ante", 1)
-        score     = gs.get("current_score", 0)
-        target    = gs.get("score_target", 1) or 1
-        event     = gs.get("event", "")
+    # Reward constants — matches v2 single instance
+    R_BLIND_COMPLETE  =  2.0
+    R_ANTE_COMPLETE   =  5.0
+    R_WIN             = 20.0
+    R_LOSE            = -2.0
+    R_SCORE_PROGRESS  =  0.05
+    DISCARD_DELTA_SCALE = 0.001
 
-        # Dense score progress: reward proportional to how close to clearing the blind
-        prev_prog  = getattr(self, "_prev_score_progress", 0.0)
-        curr_prog  = min(score / target, 1.0)
-        prog_delta = max(curr_prog - prev_prog, 0.0)
-        self._prev_score_progress = curr_prog if not terminated else 0.0
+    def _compute_reward(self, gs: dict, prev_gs: dict | None, action_type: str) -> float:
+        reward = 0.0
+        if prev_gs is None:
+            return reward
 
-        reward = prog_delta * 0.5   # up to +0.5 per blind for full score progress
+        # Score progress (+0.05 per 1% progress toward blind target)
+        old_prog = prev_gs.get("current_score", 0) / max(prev_gs.get("score_target", 1), 1)
+        new_prog = gs.get("current_score", 0)      / max(gs.get("score_target", 1), 1)
+        delta_prog = new_prog - old_prog
+        if delta_prog > 0:
+            reward += self.R_SCORE_PROGRESS * delta_prog * 100
 
-        if terminated:
-            self._prev_score_progress = 0.0
-            reward += float(ante - 1) * 2.0   # +2 per ante cleared
-            reward -= 1.0                       # lose penalty
+        # Blind cleared (round incremented within same ante)
+        old_round, new_round = prev_gs.get("round", 0), gs.get("round", 0)
+        old_ante,  new_ante  = prev_gs.get("ante",  1), gs.get("ante",  1)
+        if new_round > old_round and new_ante == old_ante:
+            reward += self.R_BLIND_COMPLETE
+
+        # Ante cleared
+        if new_ante > old_ante:
+            reward += self.R_ANTE_COMPLETE
+
+        # Win (ante 8 cleared)
+        if new_ante > 8:
+            reward += self.R_WIN
+
+        # Lose penalty
+        if gs.get("event") == "game_over":
+            reward += self.R_LOSE
+
+        # Discard reward: delta best play score
+        if action_type == "discard":
+            old_best = prev_gs.get("play_options", [{}])[0].get("score", 0) if prev_gs.get("play_options") else 0
+            new_best = gs.get("play_options",      [{}])[0].get("score", 0) if gs.get("play_options")      else 0
+            reward  += self.DISCARD_DELTA_SCALE * (new_best - old_best)
 
         return reward
 
