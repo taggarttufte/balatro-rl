@@ -1,208 +1,229 @@
-# V4 Design Notes — Shop Agent + Enhanced Communication
+# V4 Design Notes — Python Balatro Simulator
 
-*Notes from 2026-03-23 planning session. Renumbered V3→V4 on 2026-03-27: V3 is now socket IPC + custom training loop.*
+*Revised 2026-03-28. Previous V4 (dual shop agent) shelved; sim is the right foundation first.*
 
 ## Overview
 
-V3 introduces a **shop agent** that makes strategic purchasing decisions, communicating with the existing play agent to build coherent strategies.
+V4 replaces LÖVE2D/Balatro as the training environment with a **faithful Python simulation**
+of the full Balatro ruleset. The existing socket IPC (v3 mod) becomes the deployment layer:
+train on the sim, eval/play on real Balatro.
+
+### Why
+
+| Pain point (v3)              | Fix (v4)                            |
+|------------------------------|-------------------------------------|
+| ~100 sps ceiling (8 procs)   | 10,000+ sps (pure Python, no I/O)   |
+| Instance freezes, RAM bloat  | No game engine, no OS overhead      |
+| Nav sync bugs                | Deterministic state machine         |
+| Can't inspect internal state | Perfect state access for obs/debug  |
+| Hard to reproduce failures   | Seeded, reproducible runs           |
 
 ---
 
 ## Architecture
 
-### Two-Agent System
-
 ```
-┌─────────────────┐         message (16-dim latent + interpretable heads)
-│   Shop Agent    │ ──────────────────────────────────────────────────────┐
-│                 │                                                        │
-│ shop_obs → encoder → action + message                                    │
-└─────────────────┘                                                        ▼
-                                                                    ┌──────────────┐
-                                                                    │  Play Agent  │
-                                                                    │   (V2 base)  │
-                                                                    │ play_obs + message → action
-                                                                    └──────────────┘
+Training:
+  balatro_sim/ (Python game engine)
+       |
+  env_sim.py (gym wrapper, same obs/action space as v3)
+       |
+  train_v4.py (vectorized PPO, 256+ envs, no sockets)
+
+Deployment:
+  Trained policy
+       |
+  env_socket.py (existing v3 socket env)
+       |
+  BalatroRL_v3.lua (real Balatro via socket IPC)
 ```
 
-### Communication: Hybrid Approach
-
-**Continuous latent (16-dim):**
-- Rich, emergent communication
-- Can encode nuanced mixed strategies
-- Learns what's useful to communicate
-
-**Interpretable heads (auxiliary outputs):**
-- `target_hand_type` — 12-way softmax (flush, pairs, straight, etc.)
-- `economy_priority` — 0.0-1.0 (how much to optimize for money)
-- `build_confidence` — 0.0-1.0 (how committed to current strategy)
-- `aggression` — 0.0-1.0 (risk tolerance)
-
-**Benefits:**
-- Latent handles nuance explicit heads can't express
-- Explicit heads enable debugging and analysis
-- Can train auxiliary losses on explicit predictions
+The obs/action space is kept **identical to v3** (206 features, 20 actions) so the trained
+policy transfers to real Balatro without modification.
 
 ---
 
-## Shop Agent Action Space
-
-### V3a — Simple (recommended starting point)
+## Sim Directory Structure
 
 ```
-Actions (14):
-├── buy_joker_1
-├── buy_joker_2
-├── buy_booster_1
-├── buy_booster_2
-├── buy_voucher
-├── sell_joker_1..5 (5 actions)
-├── reroll
-└── leave_shop
-```
+balatro_sim/
+  __init__.py
+  card.py          # Card representation (rank, suit, enhancement, edition, seal)
+  deck.py          # Deck/hand management, draw logic
+  hand_eval.py     # 12 hand types + Balatro-specific (Flush Five, Flush House, etc.)
+  scoring.py       # Chips x mult engine, retrigger logic, seal effects
+  jokers.py        # Joker registry + effect dispatch
+  blinds.py        # Small/big/boss blind definitions, all boss effects
+  shop.py          # Shop state, economy, buy/sell/reroll, vouchers
+  consumables.py   # Tarot cards, Planet cards, Spectral cards
+  game.py          # Top-level state machine (the full game loop)
+  rng.py           # Seeded RNG wrapper (mirrors Balatro's pseudorandom functions)
+  constants.py     # Hand base values, ante scaling, interest table, etc.
 
-- Auto-use consumables (heuristic)
-- Auto-pick from booster packs (heuristic)
+  jokers/          # Individual joker implementations (grouped by type)
+    __init__.py
+    base.py        # Joker base class + registry decorator
+    mult.py        # Pure mult jokers (Joker, Greedy Joker, etc.)
+    chips.py       # Pure chip jokers
+    scaling.py     # Scaling jokers (Ride the Bus, Runner, etc.)
+    hand_type.py   # Hand-type-gated jokers (Sly Joker, Half Joker, etc.)
+    economy.py     # Money jokers (Golden Joker, To the Moon, etc.)
+    retrigger.py   # Retrigger jokers (Hack, Dusk, etc.)
+    special.py     # Complex jokers (Blueprint, Brainstorm, DNA, etc.)
 
-### V3b — Full (future expansion)
-
-```
-Additional actions (~30 more):
-├── use_consumable_1..2
-├── target_card_1..8 (for Tarot effects)
-├── target_hand_type_1..12 (for Planet cards)
-└── booster_pick_1..5
+  tests/
+    test_hand_eval.py     # Known hands → expected type
+    test_scoring.py       # Known hand+jokers → expected score
+    test_blinds.py        # Boss blind effects
+    test_shop.py          # Economy, buy/sell, interest
+    test_game_flow.py     # Full run smoke tests
+    test_crossval.py      # Cross-validate sim vs real Balatro via socket
 ```
 
 ---
 
-## Enhanced Observations (for Play Agent)
+## Game State Machine
 
-### Suit Distribution (8 features)
-```python
-hearts_in_hand, diamonds_in_hand, clubs_in_hand, spades_in_hand
-hearts_in_deck, diamonds_in_deck, clubs_in_deck, spades_in_deck
 ```
+NEW_ROUND
+  -> BLIND_SELECT (choose small/big/boss, or skip)
+  -> SELECTING_HAND (draw 8 cards, play/discard up to score)
+  -> HAND_PLAYED (score hand, check vs target)
+     -> DRAW_TO_HAND (refill to 8)
+     -> back to SELECTING_HAND
+  -> ROUND_EVAL (won blind: collect $, ante up if boss)
+  -> SHOP (buy jokers/consumables/vouchers, reroll, sell)
+  -> GAME_OVER (failed to beat blind) or loop back to NEW_ROUND
 
-### Hand Potential (6 features)
-```python
-cards_to_flush       # 5 - max_same_suit
-cards_to_straight    # Cards needed to complete
-flush_draw           # 1 if 4-flush
-straight_draw        # 1 if open-ended
-max_of_a_kind        # 2=pair, 3=trips, 4=quads
-best_hand_score      # Estimated score of best current hand
-```
-
-### Joker Synergy Flags (~15 features)
-```python
-has_flush_joker, has_pair_joker, has_straight_joker
-has_face_card_joker, has_suit_bonus
-target_suit          # Which suit is buffed (0-3, -1 if none)
-money_per_hand       # Expected $ generation per hand
-money_per_discard    # Expected $ generation per discard
+Win condition: beat ante 8 boss blind.
+Loss condition: run out of hands with chips < blind target.
 ```
 
 ---
 
-## Transfer Learning from V2
+## Implementation Priority
 
-### Recommended Approach: Expand & Transfer
+### Phase 1 — Core engine (no jokers)
+- Card representation (rank 2-A, 4 suits, debuff flag)
+- Hand evaluation (all 12 types, Balatro-specific variants)
+- Scoring: base chips/mult, card chip values, mult math
+- Blind progression: ante scaling table, chips targets
+- Basic hand management: draw, play, discard, refill
+- Simple shop: buy slots (no effects yet), sell for $, leave
+- Full game loop from start to game over
 
-```
-V2: obs(206) → [256,256,128] → actions(20)
-V3: obs(206+new) → [256,256,128+new] → actions(20+shop_msg)
-```
+*Validation: run 1000 games with random agent, check score distributions are sane*
 
-1. Copy V2 weights for overlapping parts
-2. Initialize new neurons near zero
-3. Train with lower LR initially (0.5x)
-4. Gradually unfreeze V2 weights
+### Phase 2 — Common jokers (~30)
+The 20-30 jokers that appear most often and matter most for early learning:
+- Joker, Greedy/Lusty/Wrathful/Gluttonous Joker
+- Jolly/Zany/Mad/Crazy/Droll Joker (hand-type mult)
+- Sly/Wily/Clever/Devious/Crafty (hand-type chips)
+- Half Joker, Abstract Joker, Blue Joker
+- Runner, Ice Cream, Green Joker, Ride the Bus
+- Misprint, Scary Face, Business Card, Supernova
+
+*Validation: for each joker, compare 100-game score distribution to real Balatro*
+
+### Phase 3 — Boss blinds + consumables
+- All 22 boss blind effects (The Ox, The Hook, The Eye, etc.)
+- Planet cards (hand level upgrades)
+- Tarot cards (card enhancements, joker rerolls, etc.)
+
+### Phase 4 — Full joker set
+- Remaining ~120 jokers
+- Spectral cards
+- Vouchers
+
+### Phase 5 — Deck types + stakes
+- Starting deck variations
+- Stake modifiers (eternal jokers, negative ante, etc.)
 
 ---
 
-## Advanced: Privileged Learning for Complex Strategies
+## Cross-Validation Strategy
 
-### The Consumable Blocking Strategy
-
-High-level play: Hold Tarot cards to block duplicates from packs.
-
-**Problem:** Very delayed reward (20+ turns between hold and pack pull)
-
-**Solution:** Privileged training observations
-
-| Phase | Training % | Privileged Obs |
-|-------|------------|----------------|
-| Phase 1 | 0-70% | Full block info ("you blocked X, got Y") |
-| Phase 2 | 70-90% | Annealing (gradually zero out) |
-| Phase 3 | 90-100% | Human-equivalent only |
+The v3 socket IPC makes real-Balatro the oracle:
 
 ```python
-if training_progress < 0.7:
-    obs['block_info'] = actual_block_info
-elif training_progress < 0.9:
-    mask = random() > (training_progress - 0.7) / 0.2
-    obs['block_info'] = actual_block_info if mask else zeros
-else:
-    obs['block_info'] = zeros  # Fair deployment
+# test_crossval.py
+def test_hand_score(hand_cards, jokers, expected_score):
+    # 1. Feed same hand to sim
+    sim_score = sim.score_hand(hand_cards, jokers)
+    # 2. Feed same hand to real Balatro via socket
+    real_score = socket_env.force_hand(hand_cards, jokers)
+    assert abs(sim_score - real_score) / real_score < 0.01  # within 1%
 ```
 
-**Deployment:** Remove privileged observations for fair human comparison.
+Run cross-val suite after each joker batch is implemented. Catches ordering bugs,
+retrigger edge cases, and boss blind interactions before they corrupt training.
 
 ---
 
-## Money/Economy Communication
+## Observation Space (same as v3, 206 features)
 
-Shop agent can signal "we need money" through:
+Keeping 206 features unchanged so policies transfer. The sim can provide all of these
+directly from Python state with zero parsing overhead.
 
-1. **Implicit:** Buying money-generating jokers (Golden Joker, To the Moon)
-2. **Explicit:** `economy_priority` interpretable head
-3. **Latent:** Learned encoding in 16-dim message
-
-Play agent learns: "When I have money jokers + high economy signal → optimize for $ generation"
+See `balatro_rl/state_v2.py` for full spec.
 
 ---
 
-## Training Considerations
+## Training (v4)
 
-### Shared Reward
-- Both agents receive same game outcome reward
-- Encourages cooperation, not competition
+With the sim, standard vectorized gym becomes viable:
 
-### Auxiliary Losses
-- Predict pack outcomes from shop decisions
-- Predict hand type distribution from current jokers
-- Predict win probability from current state
+```python
+# train_v4.py
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from balatro_rl.env_sim import BalatroSimEnv
 
-### Preventing Communication Collapse
-- Add small noise to message during training
-- Information bottleneck on latent size
-- Auxiliary loss: reconstruct message → useful signal
+envs = SubprocVecEnv([lambda: BalatroSimEnv() for _ in range(256)])
+model = PPO("MlpPolicy", envs, ...)
+model.learn(total_timesteps=10_000_000)
+```
+
+Or reuse train_v3.py with env_sim.py swapped in — same PPO loop, just faster envs.
+
+Target: **10M steps** (vs v3's ~512k). Equivalent of ~70 hours of v3 training in under 1 hour.
+
+---
+
+## Policy Transfer (sim -> real Balatro)
+
+After training on sim:
+1. Load checkpoint
+2. Swap `env_sim.py` for `env_socket.py` (same interface)
+3. Run against real Balatro instances via socket
+4. Compare ante distribution: sim-trained policy should match or exceed v3 policy
+
+Any significant gap between sim and real performance indicates a sim fidelity bug worth fixing.
 
 ---
 
 ## Roadmap
 
 ```
-V2 (complete): Play agent only, auto-shop, file IPC
-    ↓
-V3 (in progress): Socket IPC, custom threaded PPO loop
-    ↓
-V4a: Simple shop agent (buy/sell/skip), transfer V3 weights  ← this doc
-    ↓
-V4b: Add consumable usage, booster selection
-    ↓
-V5: Enhanced play observations (deck composition, draw odds)
-    ↓
-V6: Privileged learning for advanced strategies (blocking, etc.)
+v3 (current): Socket IPC + custom threaded PPO, real Balatro, ~100 sps
+    |
+v4a: Core sim (no jokers) + cross-val harness
+    |
+v4b: Common jokers implemented + validated
+    |
+v4c: Full joker set + boss blinds + consumables
+    |
+v4 training: 10M steps on sim, policy deployed to real Balatro
+    |
+v5 (future): Shop agent (original V4 design), now with fast sim underneath
 ```
 
 ---
 
-## Key Insights
+## Key Decisions
 
-1. **Shop agent is the biggest unlock** — enables coherent build strategies
-2. **Implicit communication via jokers works** — but explicit channel is richer
-3. **Hybrid communication (latent + interpretable)** — best of both worlds
-4. **Transfer learning preserves V2 progress** — don't start from scratch
-5. **Privileged learning for complex strategies** — train with extra info, deploy without
+- **Keep 206-feature obs** — policy transfers to real Balatro without retraining
+- **Phase joker implementation** — validate each batch before training on it
+- **Real Balatro as oracle** — cross-val catches sim bugs before they corrupt training
+- **Separate jokers into submodules** — easier to track what's implemented vs not
+- **No half measures** — full faithful ruleset, not a simplified approximation
