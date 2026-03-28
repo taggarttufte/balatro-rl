@@ -238,11 +238,15 @@ class BalatroSocketEnv(gym.Env):
             return reward
 
         # Score progress (+0.05 per 1% progress toward blind target)
-        old_prog = prev_gs.get("current_score", 0) / max(prev_gs.get("score_target", 1), 1)
-        new_prog = gs.get("current_score", 0)      / max(gs.get("score_target", 1), 1)
-        delta_prog = new_prog - old_prog
-        if delta_prog > 0:
-            reward += self.R_SCORE_PROGRESS * delta_prog * 100
+        # Only compute if we have valid targets (> 10 to avoid nav state bugs)
+        old_target = prev_gs.get("score_target", 0)
+        new_target = gs.get("score_target", 0)
+        if old_target > 10 and new_target > 10:
+            old_prog = prev_gs.get("current_score", 0) / old_target
+            new_prog = gs.get("current_score", 0)      / new_target
+            delta_prog = new_prog - old_prog
+            if delta_prog > 0:
+                reward += self.R_SCORE_PROGRESS * delta_prog * 100
 
         # Blind cleared (round incremented within same ante)
         old_round, new_round = prev_gs.get("round", 0), gs.get("round", 0)
