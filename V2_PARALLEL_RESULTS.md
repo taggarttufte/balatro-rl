@@ -38,10 +38,10 @@
 
 ---
 
-## Ante Distribution Analysis (~8,700 episodes context)
+## Ante Distribution Context (from v2 single run)
 
-From a detailed audit of the v2 single-instance run that preceded parallel training
-(26,412 total episodes across multiple concatenated runs, 378k timesteps, 3/16-3/21/2026):
+From the v2 single-instance run that preceded parallel training
+(9,073 total episodes, ~210k timesteps — see V2_SINGLE_RESULTS.md):
 
 At ~8,732 episodes (snapshot from 3/21 ~6pm):
 - Ante 2+ rate (last 500 eps): **60.4%**
