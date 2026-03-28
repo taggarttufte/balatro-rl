@@ -22,7 +22,7 @@ def score(cards, joker_keys=None, planets=None):
     jokers = [JokerInstance(k) for k in (joker_keys or [])]
     pl = planets or DEFAULT_PLANETS
     hand_type, scoring_cards = evaluate_hand(cards)
-    return score_hand(
+    result, _ctx = score_hand(
         scoring_cards=scoring_cards,
         all_cards=cards,
         hand_type=hand_type,
@@ -34,6 +34,7 @@ def score(cards, joker_keys=None, planets=None):
         ante=1,
         deck_remaining=44,
     )
+    return result
 
 
 class TestBaseScoring:

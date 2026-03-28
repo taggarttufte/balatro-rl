@@ -36,9 +36,28 @@ class ScoreContext:
     deck_remaining: int = 0
     planet_levels: dict = field(default_factory=dict)   # hand_type -> level
 
+    # ── Retrigger system ──────────────────────────────────────────────────────
+    # Maps scoring_card index -> extra retrigger count (0 = score once, 1 = twice, etc.)
+    card_retriggers: dict = field(default_factory=dict)
+
+    # ── Hand eval modification flags (set by jokers before scoring) ───────────
+    all_face_cards: bool = False        # Pareidolia: treat all cards as face cards
+    four_finger_mode: bool = False      # FourFingers: Flush/Straight valid with 4 cards
+    smear_suits: bool = False           # SmearedJoker: Hearts=Diamonds, Spades=Clubs
+    all_scoring_mode: bool = False      # Splash: all played cards score
+
+    # ── Pending side-effects (collected, applied post-score) ─────────────────
+    pending_money: int = 0             # dollars to award after round
+    prevent_loss: bool = False         # Mr. Bones
+    pending_consumables: list = field(default_factory=list)  # created tarots/planets
+
     @property
     def n_jokers(self) -> int:
         return len(self.jokers)
+
+    def is_face_card(self, card) -> bool:
+        """Respects Pareidolia flag."""
+        return self.all_face_cards or card.is_face_card
 
 
 class JokerInstance:

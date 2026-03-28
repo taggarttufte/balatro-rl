@@ -3,19 +3,54 @@ scoring.py — Chip x mult scoring engine.
 
 Scoring order (mirrors Balatro source):
   1. Base chips + base mult from hand type (adjusted for planet level)
-  2. For each scoring card (in order played):
+  2. Pre-score phase: jokers set retrigger counts, hand eval flags (Blueprint, etc.)
+  3. For each scoring card (in order played):
      a. Card base chips
      b. Enhancement effects (Bonus +30, Mult +4, Glass x2 mult, etc.)
      c. Edition effects on card (Foil +50 chips, Holo +10 mult, Poly x1.5 mult)
      d. Seal effects (Red seal retrigger, Blue seal planet, etc.)
      e. Each joker fires on_score_card(card, ctx)
-  3. After all cards: each joker fires on_hand_scored(ctx)
-  4. Final score = (chips + ctx.chips) * (mult + ctx.mult) * ctx.mult_mult
-     (clamped to int)
+     f. Repeat (a-e) for each extra retrigger in ctx.card_retriggers[i]
+  4. After all cards: each joker fires on_hand_scored(ctx)
+  5. Joker editions applied
+  6. Final score = (base_chips + ctx.chips) * (base_mult + ctx.mult) * ctx.mult_mult
 """
 from .card import Card
 from .constants import HAND_BASE, HAND_LEVEL_CHIPS, HAND_LEVEL_MULT
 from .jokers.base import JokerInstance, ScoreContext
+
+
+def _score_single_card(card: Card, ctx: ScoreContext, jokers: list[JokerInstance]):
+    """Score one card pass (used for base scoring + each retrigger)."""
+    ctx.chips += card.base_chips
+
+    # Enhancement effects
+    if card.enhancement == "Bonus":
+        ctx.chips += 30
+    elif card.enhancement == "Mult":
+        ctx.mult += 4
+    elif card.enhancement == "Glass":
+        ctx.mult_mult *= 2.0
+    elif card.enhancement == "Lucky":
+        import random
+        if random.random() < 1/5:
+            ctx.mult += 20
+        if random.random() < 1/15:
+            ctx.pending_money += 20
+    elif card.enhancement == "Steel":
+        ctx.mult_mult *= 1.5  # applies while held in hand; here approximated per scoring pass
+
+    # Edition effects on card
+    if card.edition == "Foil":
+        ctx.chips += 50
+    elif card.edition == "Holographic":
+        ctx.mult += 10
+    elif card.edition == "Polychrome":
+        ctx.mult_mult *= 1.5
+
+    # Jokers: on_score_card
+    for joker in jokers:
+        joker.on_score_card(card, ctx)
 
 
 def score_hand(
@@ -29,20 +64,13 @@ def score_hand(
     dollars: int,
     ante: int,
     deck_remaining: int,
-) -> int:
+) -> tuple[int, ScoreContext]:
     """
     Compute the total score for a played hand.
 
-    Args:
-        scoring_cards: Cards that contribute to the hand type.
-        all_cards:     All played cards (including non-scoring ones like kickers).
-        hand_type:     The evaluated hand type string.
-        jokers:        Player's joker slots (ordered).
-        planet_levels: Dict of hand_type -> current level (0-indexed, level 1 = +0 bonus).
-        ...
-
     Returns:
-        Integer score (chips * mult, floored).
+        (int score, ScoreContext) — score is chips*mult floored; ctx holds
+        side-effects like pending_money and prevent_loss.
     """
     base_chips, base_mult = HAND_BASE.get(hand_type, (5, 1))
 
@@ -68,49 +96,30 @@ def score_hand(
         planet_levels=planet_levels,
     )
 
-    # Score each card
-    for card in scoring_cards:
+    # Pre-score: jokers that set flags / retrigger counts before the card loop
+    # (Blueprint/Brainstorm copy effects here; retrigger jokers like Dusk set
+    #  card_retriggers for all cards if on last hand)
+    for joker in jokers:
+        effect = __import__('balatro_sim.jokers.base', fromlist=['JOKER_REGISTRY']).JOKER_REGISTRY.get(joker.key)
+        if effect and hasattr(effect, 'pre_score'):
+            effect.pre_score(joker, ctx)
+
+    # Score each card + retriggers
+    for i, card in enumerate(scoring_cards):
         if card.debuffed:
             continue
 
-        # Card base chips
-        ctx.chips += card.base_chips
+        # Base scoring pass
+        _score_single_card(card, ctx, jokers)
 
-        # Enhancement effects
-        if card.enhancement == "Bonus":
-            ctx.chips += 30
-        elif card.enhancement == "Mult":
-            ctx.mult += 4
-        elif card.enhancement == "Glass":
-            ctx.mult_mult *= 2.0
-        elif card.enhancement == "Lucky":
-            # TODO: Lucky card (+20 mult on trigger, $20 on trigger — probabilistic)
-            pass
-        elif card.enhancement == "Steel":
-            # Steel: +0.5x mult while in hand (handled elsewhere)
-            pass
-
-        # Edition effects on card
-        if card.edition == "Foil":
-            ctx.chips += 50
-        elif card.edition == "Holographic":
-            ctx.mult += 10
-        elif card.edition == "Polychrome":
-            ctx.mult_mult *= 1.5
-
-        # Jokers: on_score_card
-        for joker in jokers:
-            joker.on_score_card(card, ctx)
-
-        # Red seal: retrigger (score card again)
+        # Red seal: retrigger this card once
         if card.seal == "Red":
-            ctx.chips += card.base_chips
-            if card.enhancement == "Bonus":
-                ctx.chips += 30
-            elif card.enhancement == "Mult":
-                ctx.mult += 4
-            for joker in jokers:
-                joker.on_score_card(card, ctx)
+            _score_single_card(card, ctx, jokers)
+
+        # Joker-initiated retriggers (e.g. Hack, SockAndBuskin, HangingChad)
+        extra = ctx.card_retriggers.get(i, 0)
+        for _ in range(extra):
+            _score_single_card(card, ctx, jokers)
 
     # Jokers: on_hand_scored (fires after all cards)
     for joker in jokers:
@@ -124,7 +133,10 @@ def score_hand(
             ctx.mult += 10
         elif joker.edition == "Polychrome":
             ctx.mult_mult *= 1.5
+        elif joker.edition == "Negative":
+            pass  # Negative gives +1 joker slot, no scoring effect
 
     total_chips = base_chips + ctx.chips
     total_mult  = (base_mult + ctx.mult) * ctx.mult_mult
-    return int(total_chips * total_mult)
+    score = int(total_chips * max(total_mult, 0))
+    return score, ctx
