@@ -171,7 +171,7 @@ class RolloutCollector(threading.Thread):
                 })
 
                 if done:
-                    ante = info.get("ante_reached", 1)
+                    ante = info.get("ante", info.get("ante_reached", 1))
                     ep_info_cycle.append((ep_steps, ante, ep_reward))
                     obs, _ = env.reset()
                     ep_steps  = 0

@@ -94,6 +94,8 @@ class BalatroSocketEnv(gym.Env):
                 return line
             if time.time() > deadline:
                 return None
+            if self._sock is None:
+                return None
             try:
                 chunk = self._sock.recv(65536).decode("utf-8", errors="replace")
                 if not chunk:
@@ -109,6 +111,8 @@ class BalatroSocketEnv(gym.Env):
 
     def _send_action(self, action_type: str, card_indices: list[int]) -> bool:
         """Send an action JSON message to Lua."""
+        if self._sock is None:
+            return False
         msg = json.dumps({"action": action_type, "card_indices": card_indices}) + "\n"
         try:
             self._sock.sendall(msg.encode("utf-8"))
@@ -218,11 +222,25 @@ class BalatroSocketEnv(gym.Env):
         return obs, reward, terminated, False, info
 
     def _compute_reward(self, gs: dict, terminated: bool) -> float:
-        ante = gs.get("ante", 1)
-        if not terminated:
-            return 0.0
-        # Sparse reward on game end: ante reached
-        return float(ante - 1)
+        ante      = gs.get("ante", 1)
+        score     = gs.get("current_score", 0)
+        target    = gs.get("score_target", 1) or 1
+        event     = gs.get("event", "")
+
+        # Dense score progress: reward proportional to how close to clearing the blind
+        prev_prog  = getattr(self, "_prev_score_progress", 0.0)
+        curr_prog  = min(score / target, 1.0)
+        prog_delta = max(curr_prog - prev_prog, 0.0)
+        self._prev_score_progress = curr_prog if not terminated else 0.0
+
+        reward = prog_delta * 0.5   # up to +0.5 per blind for full score progress
+
+        if terminated:
+            self._prev_score_progress = 0.0
+            reward += float(ante - 1) * 2.0   # +2 per ante cleared
+            reward -= 1.0                       # lose penalty
+
+        return reward
 
     def action_masks(self) -> np.ndarray:
         # Action masking disabled for now — all actions permitted, agent learns
