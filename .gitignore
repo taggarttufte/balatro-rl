@@ -1,10 +1,32 @@
-checkpoints/
-logs/
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.env
-*.egg-info/
-dist/
-build/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+ray-env/
+venv/
+env/
+ENV/
+
+# Logs and checkpoints
+logs_ray/
+logs_ray_socket/
+checkpoints/
+checkpoints_v3/
+*.log
+
+# Temp files
+.ipynb_checkpoints/
 .pytest_cache/
+.coverage
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
