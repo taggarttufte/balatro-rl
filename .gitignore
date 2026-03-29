@@ -16,7 +16,12 @@ logs_ray/
 logs_ray_socket/
 checkpoints/
 checkpoints_v3/
+checkpoints_sim/
+logs_sim/
 *.log
+
+# Keep plot scripts but not generated PNGs
+*.png
 
 # Temp files
 .ipynb_checkpoints/
