@@ -112,9 +112,11 @@ OBS_DIM = (GAME_SCALARS
 # = 14 + 208 + 50 + 42 + 12 + 16 = 342
 
 # Reward constants
-R_BLIND_COMPLETE = 2.0
+# Blind clear reward scales inversely with ante: ante 1 = 16.0, ante 8 = 2.0
+# Formula: R_BLIND_BASE * (9 - ante) — early survival is highly rewarded
+R_BLIND_BASE     = 2.0
 R_ANTE_COMPLETE  = 5.0
-R_WIN            = 20.0
+R_WIN            = 50.0   # bumped from 20 — winning is still the dominant signal
 R_LOSE           = -2.0
 R_SCORE_PROGRESS = 0.05   # per 1% progress increment
 
@@ -277,7 +279,9 @@ class BalatroSimEnv(gym.Env):
             # Crossed into shop = blind was beaten
             if (new_ante, new_blind) != (self._prev_ante, self._prev_blind_idx):
                 was_boss = (self._prev_blind_idx == 2)
-                reward += R_BLIND_COMPLETE
+                # Inverse ante scaling: ante 1 blind = 16.0, ante 8 blind = 2.0
+                blind_reward = R_BLIND_BASE * (9 - self._prev_ante)
+                reward += blind_reward
                 if was_boss:
                     reward += R_ANTE_COMPLETE
                 self._prev_ante = new_ante
