@@ -148,6 +148,7 @@ class BalatroSimEnv(gym.Env):
         self._play_combos: list[list[int]] = []   # pre-computed for current hand
         self._steps = 0
         self._play_history: list[dict] = []       # per-hand log for highlight reel
+        self._episode_reward: float = 0.0         # cumulative reward this episode
 
     # ── gym API ──────────────────────────────────────────────────────────────
 
@@ -160,6 +161,7 @@ class BalatroSimEnv(gym.Env):
         self._prev_blind_idx = 0
         self._steps = 0
         self._play_history = []
+        self._episode_reward = 0.0
         self._auto_advance()
         self._update_play_combos()
         obs = self._encode_obs()
@@ -295,9 +297,11 @@ class BalatroSimEnv(gym.Env):
             "state": new_state.name,
         }
 
+        self._episode_reward += reward
+
         # ── Highlight reel: write detailed log for good episodes ──────────
         if terminated and gs.ante >= 7 and self._play_history:
-            self._write_highlight(gs, reward)
+            self._write_highlight(gs, self._episode_reward)
 
         return obs, reward, terminated, truncated, info
 
