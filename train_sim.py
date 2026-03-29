@@ -41,7 +41,7 @@ ENTROPY_COEFF  = 0.01
 VF_COEFF       = 0.5
 GRAD_CLIP      = 0.5
 N_EPOCHS       = 10
-MINIBATCH_SIZE = 128
+MINIBATCH_SIZE = 128  # overridden by --minibatch CLI arg
 
 LOG_DIR  = Path("logs_sim")
 CKPT_DIR = Path("checkpoints_sim")
@@ -252,7 +252,8 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
 # PPO update
 # ════════════════════════════════════════════════════════════════════════════
 
-def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, device):
+def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, device,
+               minibatch_size: int = MINIBATCH_SIZE):
     obs_b  = torch.FloatTensor(obs_b).to(device)
     act_b  = torch.LongTensor(act_b).to(device)
     ret_b  = torch.FloatTensor(ret_b).to(device)
@@ -269,8 +270,8 @@ def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, de
 
     for _ in range(N_EPOCHS):
         np.random.shuffle(idx)
-        for start in range(0, len(idx), MINIBATCH_SIZE):
-            mb = idx[start:start + MINIBATCH_SIZE]
+        for start in range(0, len(idx), minibatch_size):
+            mb = idx[start:start + minibatch_size]
             dist, values = policy.forward(obs_b[mb], mask_b[mb])
             new_logp = dist.log_prob(act_b[mb])
             entropy  = dist.entropy().mean()
@@ -299,7 +300,7 @@ def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, de
 # ════════════════════════════════════════════════════════════════════════════
 
 def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
-          num_iterations: int, resume_path: str | None):
+          num_iterations: int, resume_path: str | None, minibatch_size: int = MINIBATCH_SIZE):
 
     device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size  = num_workers * envs_per_worker * steps_per_worker
@@ -342,7 +343,7 @@ def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
     print(f"train_sim.py — Python Balatro Sim PPO")
     print(f"  workers={num_workers}  envs/worker={envs_per_worker}  "
           f"steps/worker={steps_per_worker}")
-    print(f"  batch_size={batch_size:,}  minibatch={MINIBATCH_SIZE}  "
+    print(f"  batch_size={batch_size:,}  minibatch={minibatch_size}  "
           f"epochs={N_EPOCHS}")
     print(f"  obs={OBS_DIM}  actions={N_ACTIONS}  params={n_params:,}")
     print(f"  device={device}")
@@ -409,7 +410,8 @@ def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
 
         # ── PPO update ────────────────────────────────────────────────────
         loss, pg_loss, vf_loss, ent = ppo_update(
-            policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, device
+            policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, device,
+            minibatch_size=minibatch_size,
         )
         weights = {k: v.cpu() for k, v in policy.state_dict().items()}
 
@@ -492,6 +494,8 @@ if __name__ == "__main__":
                         help="Rollout steps per worker per iteration (default: 256)")
     parser.add_argument("--iterations",       type=int, default=1000)
     parser.add_argument("--resume",           type=str, default=None)
+    parser.add_argument("--minibatch",        type=int, default=MINIBATCH_SIZE,
+                        help="Minibatch size for PPO update (default: 128)")
     args = parser.parse_args()
 
     train(
@@ -500,4 +504,5 @@ if __name__ == "__main__":
         steps_per_worker = args.steps_per_worker,
         num_iterations   = args.iterations,
         resume_path      = args.resume,
+        minibatch_size   = args.minibatch,
     )
