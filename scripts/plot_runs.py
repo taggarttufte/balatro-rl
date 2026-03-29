@@ -10,9 +10,8 @@ import numpy as np
 from pathlib import Path
 
 LOGS = [
-    ("Run 1 (rank_sum, linear reward)",  "logs_sim/training_sim.log",       "#4a9eff"),
-    ("Run 2 (score sort, linear reward)", "logs_sim/training_sim_run2.log",  "#f0883e"),
-    ("Run 3 (score sort, log1p reward)",  "logs_sim/training_sim_run3.log",  "#3fb950"),
+    ("Run 3 — 4k batch, 345k params",   "logs_sim/training_sim_run3.log",  "#3fb950"),
+    ("Run 4 — 32k batch, 345k params",  "logs_sim/training_sim_run4.log",  "#f0883e"),
 ]
 
 PAT = re.compile(
@@ -108,12 +107,10 @@ for ax in [ax1, ax2, ax3, ax4]:
               loc="best")
 
 # Totals summary
-r1n = len(runs[0][1]["iter"])
-r2n = len(runs[1][1]["iter"])
-r3n = len(runs[2][1]["iter"])
+titles = "  |  ".join(f"{label.split('—')[0].strip()}: {len(d['iter'])} iters"
+                     for label, d, _ in runs if len(d["iter"]) > 0)
 fig.suptitle(
-    f"Training Runs Comparison  |  "
-    f"R1: {r1n} iters  R2: {r2n} iters  R3: {r3n} iters (current)",
+    f"Training Runs Comparison  |  {titles}",
     color=TEXT, fontsize=12, fontweight="bold", y=0.99
 )
 
