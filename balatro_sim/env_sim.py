@@ -200,13 +200,14 @@ class BalatroSimEnv(gym.Env):
 
                     gs.step({"type": "play", "cards": combo})
 
-                    # Dense reward: progress delta — capped at 1.0 so overshooting
-                    # the blind target doesn't give unbounded reward.
+                    # Dense reward: log-scaled progress so overshooting the
+                    # blind target is still incentivised but with diminishing
+                    # returns (1.5x target ≈ 1.3x reward vs exact clear;
+                    # 5x target ≈ 2x reward; 1000x target ≈ 10x reward).
                     new_progress = gs.chips_scored / max(target, 1)
-                    delta = min(new_progress - self._prev_progress,
-                                1.0 - self._prev_progress)
+                    delta = new_progress - self._prev_progress
                     if delta > 0:
-                        reward += R_SCORE_PROGRESS * delta * 100
+                        reward += R_SCORE_PROGRESS * math.log1p(delta) * 100
                     self._prev_progress = new_progress
 
                     # Record play for highlight reel
