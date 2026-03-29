@@ -105,27 +105,56 @@ def get_action_mask(env: BalatroSimEnv) -> np.ndarray:
 # Actor-Critic network
 # ════════════════════════════════════════════════════════════════════════════
 
+class ResidualBlock(nn.Module):
+    """Two-layer residual block with LayerNorm. Input and output are both `width` units."""
+    def __init__(self, width: int):
+        super().__init__()
+        self.fc1  = nn.Linear(width, width)
+        self.fc2  = nn.Linear(width, width)
+        self.norm = nn.LayerNorm(width)
+        nn.init.orthogonal_(self.fc1.weight, gain=np.sqrt(2))
+        nn.init.orthogonal_(self.fc2.weight, gain=np.sqrt(2))
+        nn.init.constant_(self.fc1.bias, 0)
+        nn.init.constant_(self.fc2.bias, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x + torch.relu(self.fc2(torch.relu(self.fc1(x)))))
+
+
 class ActorCritic(nn.Module):
+    """
+    6-layer network with residual connections.
+    Architecture:
+      input (342) -> embed (512) -> 4 residual blocks (512) -> actor/critic heads
+    Total depth: 1 embed + 4 res blocks x 2 layers each = 9 linear layers.
+    """
+    HIDDEN = 512
+
     def __init__(self):
         super().__init__()
-        self.shared = nn.Sequential(
-            nn.Linear(OBS_DIM, 512), nn.ReLU(),
-            nn.Linear(512, 256),     nn.ReLU(),
-            nn.Linear(256, 128),     nn.ReLU(),
+        H = self.HIDDEN
+        # Input embedding
+        self.embed = nn.Sequential(nn.Linear(OBS_DIM, H), nn.ReLU())
+        # 4 residual blocks = 8 linear layers (+ embed = 9 total, ~6 "effective" depth)
+        self.res_blocks = nn.Sequential(
+            ResidualBlock(H),
+            ResidualBlock(H),
+            ResidualBlock(H),
+            ResidualBlock(H),
         )
-        self.actor  = nn.Linear(128, N_ACTIONS)
-        self.critic = nn.Linear(128, 1)
+        self.actor  = nn.Linear(H, N_ACTIONS)
+        self.critic = nn.Linear(H, 1)
 
-        # Init weights
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
-                nn.init.constant_(m.bias, 0)
+        # Init heads
+        nn.init.orthogonal_(self.embed[0].weight, gain=np.sqrt(2))
+        nn.init.constant_(self.embed[0].bias, 0)
         nn.init.orthogonal_(self.actor.weight,  gain=0.01)
+        nn.init.constant_(self.actor.bias,  0)
         nn.init.orthogonal_(self.critic.weight, gain=1.0)
+        nn.init.constant_(self.critic.bias, 0)
 
     def forward(self, obs: torch.Tensor, mask: torch.Tensor | None = None):
-        x      = self.shared(obs)
+        x      = self.res_blocks(self.embed(obs))
         logits = self.actor(x)
         if mask is not None:
             logits = logits.masked_fill(~mask, float("-inf"))
