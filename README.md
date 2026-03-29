@@ -1,6 +1,8 @@
 # Balatro RL
 
-A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/) using PPO trained via a custom Gymnasium environment and live IPC with a Lua game mod.
+A reinforcement learning agent that learns to play [Balatro](https://www.playbalatro.com/) using PPO.
+
+The project went through four major versions: from a simple Lua mod with file-based IPC, through socket-based parallelism, to a complete Python simulation that trains at **429x** the speed of the original approach.
 
 > **Disclaimer:** Balatro is a product of LocalThunk/Playstack. This is an unofficial mod for research and educational purposes only.
 
@@ -8,281 +10,277 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
 
 ## What is Balatro?
 
-[Balatro](https://www.playbalatro.com/) is a roguelike deckbuilder where you play poker hands to score points.
+Balatro is a roguelike poker deckbuilder. You play 5-card hands to score chips against escalating point thresholds ("blinds"), buying joker modifiers between rounds to multiply your scoring.
 
-**Gameplay loop:**
-1. Play 5-card poker hands to score chips against escalating point thresholds ("blinds")
-2. Clear 3 blinds per ante (8 antes total to win)
-3. Between blinds, visit the shop to buy "jokers" — modifiers that multiply your scoring
-4. Joker synergies are the core strategic layer: the right combo can score millions from a simple pair
-
-**Why it's an interesting RL problem:**
+**Why it's a hard RL problem:**
 
 | Challenge | Description |
 |-----------|-------------|
 | Combinatorial action space | 8 cards → 218 possible play/discard combinations per turn |
 | Long-horizon credit assignment | A joker bought in ante 1 might only pay off in ante 6 |
-| Partial observability | Agent can't see upcoming blinds, full deck order, or future shop contents |
+| Partial observability | Upcoming blinds, deck order, future shop contents all unknown |
 | Sparse rewards | Only hands that clear blinds produce meaningful reward |
-| Stochastic elements | Card draws, joker spawns, boss blind effects are all randomized |
-| Compounding strategy | Hand upgrades, deck thinning, and joker combos interact multiplicatively |
+| Stochastic elements | Card draws, joker spawns, boss blind effects are randomized |
+| Compounding strategy | Hand upgrades, deck thinning, joker combos interact multiplicatively |
 
 A skilled human wins ~70% of runs. Random play wins <0.01%.
 
 ---
 
-## Architecture (Current: V3)
+## Current Version: V4 — Python Simulation
 
-### IPC Protocol — Socket-based
+### Why the rewrite
 
-Python and Lua communicate over TCP sockets (IPv6, loopback):
-- Lua acts as **server** (one port per instance: 5001-5008)
-- Python acts as **client**, connects once per env on startup
-- Messages are newline-delimited JSON
-- State is sent on meaningful events only (G.STATE transitions, discard detection, connect)
+V3 trained against 8 live Balatro instances over socket IPC at ~14 steps/sec after RAM
+degradation. The Lua runtime leaked memory across long runs, instances needed manual
+restarts, and the GIL limited Python-side concurrency. The biggest bottleneck: every
+training step required round-tripping through a live game process.
+
+**The core insight:** Balatro's rules are fully deterministic given a seed. We don't need
+the game running during training — we just need a correct Python model of it.
+
+V4 replaces the live game with a pure Python simulation. Training is now:
+- **~4,000 steps/sec** using 16 multiprocessing workers (bypasses GIL entirely)
+- Zero RAM degradation (no Lua runtime)
+- No instance management, no watchdog scripts, no socket timeouts
+- Real Balatro still used as the deployment/validation target via the V3 socket IPC
+
+### V4 Architecture
 
 ```
-Lua game loop:
-  G.STATE changes → send {"event": "selecting_hand", ...}
-  discards_left decreases → send {"event": "selecting_hand", ...}
-  on connect → send current state
-
-Python env:
-  reset() → send "new_run", wait for "selecting_hand"
-  step()  → send action, wait for next actionable state
+train_sim.py
+  16 multiprocessing workers (one per CPU core)
+  each worker: BalatroSimEnv → BalatroGame
+  
+  Rollout collection: 16 workers × 512 steps = 8,192 steps/iter
+  PPO update: CUDA (RTX 3080 Ti), minibatch=256, 10 epochs
+  
+  IPC: multiprocessing.Pipe (no sockets, no file I/O)
 ```
 
-### Observation Space (206 features)
+### Simulation
+
+The Python sim (`balatro_sim/`) reimplements Balatro's full ruleset:
+
+| Module | Contents |
+|--------|----------|
+| `game.py` | Full game loop — BLIND_SELECT, SELECTING_HAND, SHOP, ROUND_EVAL states; 15 boss blind effects; ante progression; win condition |
+| `scoring.py` | Chip/mult computation, card enhancements, editions, seals, retriggers |
+| `hand_eval.py` | All 12 hand types including Flush Five / Flush House |
+| `jokers/` | **164 jokers** implemented across 6 modules |
+| `consumables.py` | 12 planets, 22 tarots, 18 spectrals, 27 vouchers |
+| `shop.py` | Weighted rarity rolls, buy/sell/reroll, full 150+ item catalogue |
+| `env_sim.py` | Gymnasium-compatible wrapper, obs=342, actions=46 |
+
+### Observation Space (342 features)
 
 | Range | Description |
 |-------|-------------|
-| `[0:40]` | Top 10 play options × 4 features (chips, mult, hand_type_id, num_cards) |
-| `[40:70]` | Top 10 discard options × 3 features (expected score delta, target hand type, num_cards) |
-| `[70:83]` | Hand cards — 8 slots × (rank, suit, exists) |
-| `[83:113]` | Jokers — 5 slots × 6 features (type, sell value, rarity, buy price, effect, exists) |
-| `[113:122]` | Scalar state — ante, round, score_progress, hands_left, discards_left, money, joker_slots, deck_remaining, discard_count |
-| `[122:146]` | Hand levels — 12 types × 2 (level, chips) |
-| `[146:163]` | Deck composition — 13 rank counts + 4 suit counts |
+| `[0:40]` | Hand cards — 8 slots × 5 features (rank, suit, enhancement, edition, seal) |
+| `[40:100]` | Play combos — 20 slots × 3 features (hand_type_id, score_estimate, num_cards) |
+| `[100:108]` | Discard options — 8 slots |
+| `[108:174]` | Jokers — 5 slots × (type_id + state features) |
+| `[174:198]` | Consumables, vouchers |
+| `[198:210]` | Scalar state — ante, blind_idx, score_progress, hands_left, discards_left, dollars, etc. |
+| `[210:342]` | Deck composition, hand type levels |
 
-### Action Space — `Discrete(20)`
+### Action Space — `Discrete(46)`
 
 ```
-[0-9]   → play one of top 10 pre-ranked hands (sorted by chip×mult, computed by Lua)
-[10-19] → discard one of top 10 pre-ranked card subsets (sorted by draw potential)
+[0-19]   play combo (sorted by score_hand() descending — best hand always action 0)
+[20-27]  discard card at position i
+[28-29]  use consumable
+[30]     play blind
+[31]     skip blind (non-boss only)
+[32-38]  buy shop item
+[39-43]  sell joker
+[44]     reroll shop
+[45]     leave shop
 ```
 
-Lua enumerates all ~218 card combinations each step, ranks them, and returns the top 10 of each type in the state JSON. Agent picks one index. Eliminates the need to learn card combination evaluation from scratch.
+Play combos are pre-ranked by actual `score_hand()` output, accounting for current
+jokers, planet levels, and card enhancements. Action 0 is always the highest-scoring play.
 
 ### Reward Structure
 
 | Signal | Value |
 |--------|-------|
-| Blind cleared | +1.0 |
-| Ante completed (all 3 blinds) | +3.0 |
-| Game won (ante 8) | +10.0 |
-| Lost (hands exhausted) | -2.0 |
-| Score progress (per 1% of target) | +0.05 |
-| Discard quality bonus | delta best_play_score |
+| Blind cleared | +2.0 |
+| Ante completed | +5.0 |
+| Game won (past ante 8) | +20.0 |
+| Game lost | -2.0 |
+| Score progress (log-scaled) | `0.05 × log(1 + delta) × 100` |
 
-### Training — Custom Threaded PPO (V3)
+Score progress uses log scaling so overshooting the blind target is rewarded but with
+diminishing returns — 1.5x target ≈ 1.3x reward, 5x ≈ 2x reward, 1000x ≈ 10x reward.
+Linear scaling produced reward values up to 82 million, destabilizing PPO updates.
 
-8 threads, one per Balatro instance. Python's GIL releases during socket `recv()`, so
-threads genuinely overlap while waiting for game responses:
+### Network Architecture
 
+**Current (run 5+):** 6-layer residual network, 2.3M parameters
 ```
-Thread 1: Env 1 (port 5001) ─┐
-Thread 2: Env 2 (port 5002) ─┤
-...                            ├→ shared experience queue → PPO update (PyTorch)
-Thread 8: Env 8 (port 5008) ─┘
+input (342) → embed (512) → 4 × ResidualBlock(512) → actor head (46) / critic head (1)
+
+ResidualBlock: x + ReLU(fc2(ReLU(fc1(x)))), with LayerNorm
 ```
 
-Expected throughput: ~90 steps/sec (8 × 11.7 steps/sec per instance at 128x game speed).
+**Previous (runs 1-4):** 3-layer MLP, 345k parameters
+```
+input (342) → 512 → 256 → 128 → actor / critic
+```
+
+The residual architecture was chosen based on research showing deeper networks are
+needed to learn 4+ way conditional interactions (e.g. "Green Joker + Burglar + high
+hand level + sufficient hands remaining → play this combo"). A 3-layer MLP can learn
+pairwise correlations but struggles with deeper joker synergies.
 
 ---
 
-## Development History
+## Training Runs
 
-### Throughput Evolution
+All runs use 16 workers, `train_sim.py`, same sim code. The key variables are batch size and network architecture.
 
-Each version iterated on IPC method, training framework, and parallelism. The chart below
-shows how steps/sec improved from the initial prototype to v3.
+| Run | Batch | Minibatch | Network | Params | Iters | Notes |
+|-----|-------|-----------|---------|--------|-------|-------|
+| Run 1 | 4,096 | 128 | 3-layer MLP | 345k | 1,000 | Reward unbounded (linear delta) — spikes to 82M |
+| Run 2 | 4,096 | 128 | 3-layer MLP | 345k | ~180 | Killed — same reward issue |
+| Run 3 | 4,096 | 128 | 3-layer MLP | 345k | 1,000 | Log1p reward fix; score-sorted combos; highlight logger |
+| Run 4 | 32,768 | 512 | 3-layer MLP | 345k | 1,000 | Large batch comparison vs run 3 |
+| Run 5 | 8,192 | 256 | 6-layer residual | 2.3M | 1,000 | New architecture |
 
-```
-Steps/sec
-  140 |                                              ████  ← v3 (8-env, actual)
-      |                                              ████
-      |                                              ████
-   94 |                                         ███████  ← v3 (8-env, theoretical)
-      |                                         ███████
-      |                                         ███████
-   42 |                              ████████████████
-      |                              ████████████████  ← v3 (1-env, 128x)
-   22 |                    ██████████████████████████
-      |                    ██████████████████████████  ← v3 (1-env, 64x) = v2 parallel
-    6 |         ███████████████████████████████████████
-      |         ███████████████████████████████████████  ← v2 parallel (Ray, 8-env, file IPC)
-  0.5 |  ████
-      |  ████  ← v2 single (file IPC, 1-env)
- 0.05 | █
-      | █  ← v1 (file IPC, 1-env)
-      └──────────────────────────────────────────────
-        v1    v2s   v2p   v3-1x  v3-1x  v3-8x  v3-8x
-                         64x    128x   theo   actual
-```
-
-| Version | IPC | Framework | Envs | Speed | Steps/sec | Steps/hour | Speedup vs v1 |
-|---------|-----|-----------|------|-------|-----------|------------|---------------|
-| V1 | File poll | SB3 MaskablePPO | 1 | 64x | ~0.08 | ~300 | 1x |
-| V2 single | File poll | SB3 MaskablePPO | 1 | 64x | ~0.5 | ~1,800 | ~6x |
-| V2 parallel | File poll | Ray PPO (old API) | 8 | 64x | ~6 | ~21,600 | ~70x |
-| V3 socket | TCP socket | Custom threaded PPO | 1 | 64x | ~6.1 | ~22,000 | ~70x |
-| V3 socket | TCP socket | Custom threaded PPO | 1 | 128x | ~11.7 | ~42,000 | ~140x |
-| **V3 socket** | **TCP socket** | **Custom threaded PPO** | **8** | **64x** | **~39** | **~140,000** | **~470x** |
-
-> V3 single-env socket matches v2 parallel throughput. The 6.5x gain over v2 parallel comes entirely
-> from true threading — Ray's VectorEnv was sequential (no actual parallelism), our custom
-> 8-thread loop is not.
+**Key results (run 3, 1,000 iters / 4.1M steps / 41 min wall time):**
+- Best ante: 9 (full win), reached by iter 3
+- Full win rate: ~0.47% (965 wins / 79k episodes combined)
+- Reward: 1.7 → 48 avg (last 10 iters)
+- Entropy stable at 2.5 — policy stayed exploratory throughout
+- Top jokers in winning runs: Green Joker (28%), Burglar (27%), Space Joker (27%)
 
 ---
 
-### Architecture Evolution
+## What We Learned
 
-| | V1 | V2 | V3 |
-|-|----|----|-----|
-| **Action space** | MultiBinary(9) — agent sets 9 card-selection bits | Discrete(20) — Lua pre-ranks, agent picks index | Discrete(20) — same |
-| **Obs features** | 119 | 119 | 206 (adds play/discard option embeddings) |
-| **IPC** | File poll (50ms) | File poll (50ms) | TCP socket (event-driven) |
-| **IPC latency** | ~50ms + fs delay | ~50ms + fs delay | ~1ms (synchronous) |
-| **IPC reliability** | Drops steps under load | Drops steps under load | Every action acknowledged |
-| **Training** | SB3 MaskablePPO | SB3 MaskablePPO | Custom threaded PPO (PyTorch) |
-| **Parallelism** | None | None → Ray (sequential) | 8 threads, true I/O concurrency |
-| **Inference device** | CPU | CPU | CPU per thread (GPU for PPO batch updates) |
-| **Game speed** | 64x | 64x | 64x (CPU-bottlenecked at 8 envs) |
+### V3 Lessons (Live Game Training)
 
-#### Why each change was made
+**RAM degradation is fatal for long runs.** After ~4-6 hours, 8 Balatro instances ballooned
+to 23GB RAM combined. The Lua GC (even with aggressive tuning: `setpause=80, setstepmul=400`)
+couldn't keep up with the object churn from 128x game speed. Training degraded from 39 sps
+to 3-10 sps. A watchdog script helped but didn't fully solve it — instances needed hard kills
+and restarts every few hours.
 
-**MultiBinary → Discrete(20):**
-V1's action space required the agent to learn card combination evaluation from scratch.
-Discrete(20) offloads that to Lua: the game pre-ranks all ~2¹⁸ valid combinations and
-returns the top 10 plays + top 10 discards. Agent just picks one. This alone drove ante2+
-rate from ~1.9% to ~60.4%.
+**Threading vs Ray.** Ray's VectorEnv steps environments sequentially — 8 environments gave
+the same throughput as 1. Custom Python threading releases the GIL during `socket.recv()`,
+giving true I/O concurrency. But Python threading still hits CPU limits from the game sim.
 
-**File IPC → Socket IPC:**
-File-based IPC was fundamentally unreliable: at 64x game speed, Lua sometimes advanced
-multiple game states before Python could poll, silently dropping steps. Socket IPC is
-synchronous — Lua waits for Python's response before proceeding. Benchmark showed
-3.31x speedup at identical game speed, and episode length grew from ~20 to ~90 steps
-(fewer dropped actions = richer episodes).
+**Socket IPC vs file IPC.** At 128x game speed, file polling dropped actions when Lua
+advanced multiple states between Python polls. Socket IPC is synchronous — Lua waits for
+a response before proceeding. 3.31x throughput improvement at identical game speed, and
+much richer episodes (20 → 90 steps average) from fewer dropped actions.
 
-**SB3/Ray → Custom threaded PPO:**
-Ray's VectorEnv (old API stack) steps all environments sequentially in a single thread —
-8 envs produce the same throughput as 1 env. Custom Python threading releases the GIL
-during socket `recv()`, giving true I/O concurrency across 8 game instances.
-CUDA threading issues (NaN from concurrent kernel execution) solved by per-thread CPU
-inference with periodic GPU weight sync; CUDA reserved for batch PPO updates.
+**128x speed caused CPU bottleneck.** At 128x, the Balatro instances saturated the CPU
+before the Python training loop did. 64x was the sweet spot for 8 parallel instances.
 
----
+### V4 Lessons (Python Sim Training)
 
-### Results by Version
+**Pre-ranking actions matters enormously.** Run 1 used hand type priority for combo ordering,
+which correctly puts Flush Five above High Card. But within the same hand type, it used
+rank sum as a tiebreak, ignoring joker effects. With 20 unranked combos, the agent had
+to learn which index corresponded to the best play purely from reward signal. Switching to
+actual `score_hand()` tiebreaking (accounting for current jokers, planet levels,
+enhancements) caused ante 9 to appear by **iteration 2** instead of iteration 460.
 
-| Version | Steps | Episodes | Ante 2+ Rate | Best Ante | Notes |
-|---------|-------|----------|--------------|-----------|-------|
-| V1 | ~376k | 26,412 | 1.89% | 5 | MultiBinary bottleneck; most runs end at Small Blind |
-| V2 single | ~210k | 9,073 | **60.4%** *(at 8.7k eps)* | 9 | Discrete(20) key change; plateaued ~60% |
-| V2 parallel | ~41k | — | — | 5 *(by ep 279)* | Paused to build v3; was on trajectory |
-| **V3** | in progress | — | — | — | Socket IPC + custom PPO; running now |
+**Unbounded rewards destabilize PPO.** The original score progress reward was linear:
+`reward = 0.05 × (chips_scored / chips_target) × 100`. With stacked jokers at late antes,
+chips_scored can be 10,000× the target — producing rewards of 82 million in a single
+episode. This blew up return normalization and caused positive policy gradient loss. Log
+scaling fixed it immediately.
 
-**V2 blind-level breakdown** (at 8,732 episodes, confirmed reference point):
+**Larger batches = smoother gradients, same peak performance.** Run 4 (32k batch) reached
+the same reward levels as run 3 (4k batch) with significantly less variance in the learning
+curve. Both hit best ante 9 within the first 5 iterations. Larger batches don't necessarily
+learn faster in terms of steps, but updates are more stable.
 
-| Blind | Survival rate |
-|-------|--------------|
-| Small Blind | 40% — primary bottleneck |
-| Big Blind | ~100% (if Small cleared) |
-| Boss Blind | ~60% |
+**Episode length is the key training health indicator.** Starting episodes: ~15 steps (agent
+dies at ante 1). By iter 1000: ~100+ steps per episode. This measures whether the policy
+is genuinely improving — a policy that's stuck would maintain short episodes.
 
-Small Blind is where ~60% of runs die. Agent learned Big Blind is nearly free but
-struggles to build a joker combo strong enough to survive Boss Blind consistently.
-
-See `V1_RESULTS.md`, `V2_SINGLE_RESULTS.md`, `V2_PARALLEL_RESULTS.md` for full details.
+**Winning joker builds are learnable.** After 80k+ episodes, the agent consistently finds
+the Green Joker + Burglar + Space Joker core in ~28% of winning runs. This makes game-
+theoretic sense: Burglar gives extra hands → Green Joker scales mult per hand played →
+Space Joker levels up hand types from the extra plays. The agent discovered this synergy
+without being told it exists.
 
 ---
 
-## Setup
+## Throughput Comparison
 
-### Requirements
+| Version | Method | Parallelism | Steps/sec | vs V1 |
+|---------|--------|-------------|-----------|-------|
+| V1 | File IPC, SB3 | 1 env | ~0.08 | 1× |
+| V2 single | File IPC, SB3 | 1 env | ~6 | 75× |
+| V2 parallel | File IPC, Ray | 8 envs | ~6 | 75× |
+| V3 | Socket IPC, custom PPO | 8 envs | ~14* | 175× |
+| **V4** | **Python sim, multiprocessing** | **16 workers** | **~4,000** | **50,000×** |
 
-- Balatro (Steam)
-- [Steamodded](https://github.com/Steamopollys/Steamodded) mod loader
-- [Handy](https://github.com/nicholassam6425/balatro-mods) mod (speed control + animation skip)
-- Python 3.10+
+*V3 degraded from ~39 sps to ~14 sps median over training due to RAM issues.
 
-```bash
-pip install torch numpy gymnasium
-```
-
-### Install the Lua Mod
-
-Copy `Mods/BalatroRL_v3/` to:
-```
-%AppData%\Balatro\Mods\BalatroRL_v3\
-```
-
-### Launch Instances
-
-```powershell
-# Launch all 8 instances (instances 2-8 from C:\BalatroParallel\)
-.\launch_parallel.ps1
-```
-
-### Train (V3)
-
-```bash
-# Start training (8 envs, 500 iterations)
-python train_v3.py --envs 8 --iterations 500
-```
-
-### Monitor
-
-```bash
-python check_progress.py    # Episode summary + ante distribution
-python analyze_recent.py    # Rolling window analysis
-```
+**V4 bottleneck:** Pure Python game simulation. CPU (Ryzen 9 7950X, 16 cores) is fully
+utilized at 16 workers. A C extension or JAX-based sim would yield 50-200× further
+improvement.
 
 ---
 
-## Project Layout
+## Repository Layout
 
 ```
 balatro-rl/
-├── balatro_rl/
-│   ├── env_socket.py       # V3 Gymnasium env (socket IPC)
-│   ├── env_parallel.py     # V2 env (file IPC, 8 instances) — reference
-│   ├── env_v2.py           # V2 env (file IPC, single) — reference
-│   ├── env.py              # V1 env — obsolete
-│   ├── state_v2.py         # State parser (206-feature obs)
-│   ├── action_v2.py        # Action space (Discrete 20)
-│   └── ray/                # Ray wrappers (abandoned)
-├── train_v3.py             # V3 training script (custom threaded PPO)
-├── train_ray_socket.py     # Ray attempt (abandoned, kept for reference)
-├── train_ray.py            # V2 parallel Ray training
-├── train_v2.py             # V2 single SB3 training
-├── launch_parallel.ps1     # Launch all 8 Balatro instances
-├── logs_v2/                # V2 single training logs + checkpoints
-├── logs_ray/               # V2 parallel Ray logs
-├── logs_ray_socket/        # V3 socket logs
-├── checkpoints_v2/         # V2 single model weights (165MB)
-├── checkpoints_ray/        # V2 parallel Ray checkpoints
-├── V1_RESULTS.md           # V1 final results
-├── V2_SINGLE_RESULTS.md    # V2 single training results
-├── V2_PARALLEL_RESULTS.md  # V2 parallel (Ray) training results
-├── V3_DESIGN_NOTES.md      # V3 architecture: socket IPC + custom loop
-├── V4_DESIGN_NOTES.md      # V4 plan: dual shop agent
-├── NOTES.md                # Full dev log
-└── PARALLEL_SETUP.md       # Parallel instance setup guide
+├── train_sim.py              # V4 training — 16-worker multiprocessing PPO (current)
+├── balatro_sim/              # Python Balatro simulation
+│   ├── game.py               # Full game loop (BalatroGame class)
+│   ├── env_sim.py            # Gymnasium env wrapper
+│   ├── scoring.py            # Chip/mult scoring engine
+│   ├── hand_eval.py          # Hand type evaluation
+│   ├── consumables.py        # Planets, tarots, spectrals, vouchers
+│   ├── shop.py               # Shop system
+│   ├── card.py               # Card representation
+│   ├── constants.py          # Game constants
+│   └── jokers/               # 164 jokers across 6 modules
+│       ├── mult.py, chips.py, scaling.py
+│       ├── hand_type.py, economy.py, misc.py
+│       └── tests/            # 120 tests, all passing
+├── scripts/                  # Plotting and analysis
+│   ├── plot_runs.py          # Multi-run comparison charts
+│   ├── plot_v4.py            # V4 training dashboard
+│   └── plot_training.py      # V2/V3/V4 comparison
+├── results/                  # Design notes and historical results
+│   ├── V1_RESULTS.md, V2_SINGLE_RESULTS.md, V2_PARALLEL_RESULTS.md
+│   ├── V3_DESIGN_NOTES.md, V4_DESIGN_NOTES.md
+│   └── NOTES.md, PARALLEL_SETUP.md
+├── legacy/
+│   ├── training/             # V1-V3 training scripts
+│   └── tests/                # V1-V3 test and analysis scripts
+└── launch/                   # PowerShell scripts for V3 instance management
+```
 
-Mods (installed in Balatro):
-  %AppData%\Balatro\Mods\BalatroRL_v3\BalatroRL_v3.lua   ← active (all instances)
-  %AppData%\Balatro\Mods\BalatroRL\BalatroRL.lua         ← V2 mod (inactive)
+---
+
+## Setup (V4 — Python Sim)
+
+```bash
+git clone https://github.com/taggarttufte/balatro-rl
+cd balatro-rl
+python -m venv env && source env/bin/activate  # or env\Scripts\activate on Windows
+pip install torch numpy gymnasium
+```
+
+```bash
+# Run tests
+python -m pytest balatro_sim/tests/ -v
+
+# Train (default: 16 workers, 8k batch, 1000 iters)
+python train_sim.py --workers 16 --steps-per-worker 512 --iterations 1000
+
+# Resume from checkpoint
+python train_sim.py --resume checkpoints_sim/iter_0500.pt --iterations 500
 ```
 
 ---
@@ -290,4 +288,4 @@ Mods (installed in Balatro):
 ## Acknowledgments
 
 Built on [Steamodded](https://github.com/Steamopollys/Steamodded) for Lua mod loading
-and [Handy](https://github.com/nicholassam6425/balatro-mods) for speed control.
+and [Handy](https://github.com/nicholassam6425/balatro-mods) for speed control (V3).
