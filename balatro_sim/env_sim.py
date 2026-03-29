@@ -147,6 +147,7 @@ class BalatroSimEnv(gym.Env):
         self._prev_blind_idx = 0
         self._play_combos: list[list[int]] = []   # pre-computed for current hand
         self._steps = 0
+        self._play_history: list[dict] = []       # per-hand log for highlight reel
 
     # ── gym API ──────────────────────────────────────────────────────────────
 
@@ -158,6 +159,7 @@ class BalatroSimEnv(gym.Env):
         self._prev_ante = 1
         self._prev_blind_idx = 0
         self._steps = 0
+        self._play_history = []
         self._auto_advance()
         self._update_play_combos()
         obs = self._encode_obs()
@@ -189,13 +191,41 @@ class BalatroSimEnv(gym.Env):
             if 0 <= action <= 19:
                 if action < len(self._play_combos):
                     combo = self._play_combos[action]
+                    # Capture pre-play state for highlight log
+                    cards_played = [repr(gs.hand[i]) for i in combo]
+                    jokers_held  = [j.key for j in gs.jokers]
+                    ante_now     = gs.ante
+                    blind_kind   = gs.current_blind.kind if gs.current_blind else "?"
+                    chips_before = gs.chips_scored
+
                     gs.step({"type": "play", "cards": combo})
-                    # Dense reward: progress delta
+
+                    # Dense reward: progress delta — capped at 1.0 so overshooting
+                    # the blind target doesn't give unbounded reward.
                     new_progress = gs.chips_scored / max(target, 1)
-                    delta = new_progress - self._prev_progress
+                    delta = min(new_progress - self._prev_progress,
+                                1.0 - self._prev_progress)
                     if delta > 0:
                         reward += R_SCORE_PROGRESS * delta * 100
                     self._prev_progress = new_progress
+
+                    # Record play for highlight reel
+                    try:
+                        ht, _ = evaluate_hand([gs.hand[i] for i in combo]
+                                              if gs.state == State.SELECTING_HAND
+                                              else [])
+                    except Exception:
+                        ht = "?"
+                    self._play_history.append({
+                        "ante":        ante_now,
+                        "blind":       blind_kind,
+                        "cards":       cards_played,
+                        "hand_type":   ht,
+                        "chips":       gs.chips_scored - chips_before,
+                        "total":       gs.chips_scored,
+                        "target":      target,
+                        "jokers":      jokers_held,
+                    })
                     self._update_play_combos()
 
             elif 20 <= action <= 27:
@@ -265,7 +295,41 @@ class BalatroSimEnv(gym.Env):
             "n_jokers": len(gs.jokers),
             "state": new_state.name,
         }
+
+        # ── Highlight reel: write detailed log for good episodes ──────────
+        if terminated and gs.ante >= 7 and self._play_history:
+            self._write_highlight(gs, reward)
+
         return obs, reward, terminated, truncated, info
+
+    def _write_highlight(self, gs, total_reward: float):
+        """Append a rich episode record to logs_sim/highlights.jsonl."""
+        import json, os
+        os.makedirs("logs_sim", exist_ok=True)
+        record = {
+            "seed":         self._seed,
+            "ante_reached": gs.ante,
+            "won":          gs.ante > 8,
+            "total_reward": round(total_reward, 2),
+            "dollars":      gs.dollars,
+            "steps":        self._steps,
+            "jokers_final": [j.key for j in gs.jokers],
+            "plays": [
+                {
+                    "ante":      p["ante"],
+                    "blind":     p["blind"],
+                    "hand_type": p["hand_type"],
+                    "cards":     p["cards"],
+                    "chips":     p["chips"],
+                    "total":     p["total"],
+                    "target":    p["target"],
+                    "jokers":    p["jokers"],
+                }
+                for p in self._play_history
+            ],
+        }
+        with open("logs_sim/highlights.jsonl", "a") as f:
+            f.write(json.dumps(record) + "\n")
 
     def _auto_advance(self):
         """Auto-step through non-decision states (ROUND_EVAL, BOOSTER_OPEN)."""
