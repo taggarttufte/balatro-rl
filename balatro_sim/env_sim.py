@@ -192,7 +192,7 @@ class BalatroSimEnv(gym.Env):
                 if action < len(self._play_combos):
                     combo = self._play_combos[action]
                     # Capture pre-play state for highlight log
-                    cards_played = [repr(gs.hand[i]) for i in combo]
+                    pre_cards    = [gs.hand[i] for i in combo if i < len(gs.hand)]
                     jokers_held  = [j.key for j in gs.jokers]
                     ante_now     = gs.ante
                     blind_kind   = gs.current_blind.kind if gs.current_blind else "?"
@@ -202,25 +202,23 @@ class BalatroSimEnv(gym.Env):
 
                     # Dense reward: log-scaled progress so overshooting the
                     # blind target is still incentivised but with diminishing
-                    # returns (1.5x target ≈ 1.3x reward vs exact clear;
-                    # 5x target ≈ 2x reward; 1000x target ≈ 10x reward).
+                    # returns (1.5x target ~ 1.3x reward vs exact clear;
+                    # 5x target ~ 2x reward; 1000x target ~ 10x reward).
                     new_progress = gs.chips_scored / max(target, 1)
                     delta = new_progress - self._prev_progress
                     if delta > 0:
                         reward += R_SCORE_PROGRESS * math.log1p(delta) * 100
                     self._prev_progress = new_progress
 
-                    # Record play for highlight reel
+                    # Record play for highlight reel using pre-captured cards
                     try:
-                        ht, _ = evaluate_hand([gs.hand[i] for i in combo]
-                                              if gs.state == State.SELECTING_HAND
-                                              else [])
+                        ht, _ = evaluate_hand(pre_cards) if pre_cards else ("?", [])
                     except Exception:
                         ht = "?"
                     self._play_history.append({
                         "ante":        ante_now,
                         "blind":       blind_kind,
-                        "cards":       cards_played,
+                        "cards":       [repr(c) for c in pre_cards],
                         "hand_type":   ht,
                         "chips":       gs.chips_scored - chips_before,
                         "total":       gs.chips_scored,
