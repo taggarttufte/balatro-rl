@@ -124,7 +124,9 @@ R_ANTE_COMPLETE = 5.0
 R_WIN           = 50.0
 R_LOSE          = -2.0
 R_SCORE_PROGRESS= 0.05
-R_QUALITY_SCALE = 0.2   # loadout quality delta per shop phase
+R_QUALITY_SCALE = 0.5   # loadout quality delta per shop phase (bumped from 0.2)
+R_LEAVE_SHOP    = -0.1  # small penalty for leaving shop — encourages exploration
+R_SPEND         = 0.05  # reward per dollar spent — incentivizes buying over hoarding
 
 # Pack sub-states
 SUBSTATE_NORMAL      = "normal"
@@ -378,6 +380,7 @@ class BalatroSimEnvV5(gym.Env):
             )
             quality_delta = curr_quality - prev_quality
             reward += R_QUALITY_SCALE * quality_delta
+            reward += R_LEAVE_SHOP   # small penalty to discourage always leaving
             self._prev_quality = curr_quality
             game.step({"type": "leave_shop"})
 
@@ -386,19 +389,28 @@ class BalatroSimEnvV5(gym.Env):
             items = [i for i in game.current_shop if not i.sold and i.kind != "booster"]
             if item_idx < len(items):
                 item = items[item_idx]
+                price = item.discounted_price(game.shop_discount)
                 if item.kind == "booster":
                     bought = buy_item(game, item)
                     if bought:
+                        reward += R_SPEND * price
                         self._enter_pack_open(game)
                 else:
+                    before = game.dollars
                     buy_item(game, item)
+                    spent = before - game.dollars
+                    if spent > 0:
+                        reward += R_SPEND * spent
 
         elif action in (8, 9):  # buy booster pack 0-1
             pack_idx = action - 8
             packs = [i for i in game.current_shop if i.kind == "booster" and not i.sold]
             if pack_idx < len(packs):
+                before = game.dollars
                 bought = buy_item(game, packs[pack_idx])
                 if bought:
+                    spent = before - game.dollars
+                    reward += R_SPEND * max(spent, 0)
                     self._enter_pack_open(game)
 
         elif 10 <= action <= 14:  # sell joker 0-4
