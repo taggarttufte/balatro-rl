@@ -517,7 +517,8 @@ def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, de
 def train(num_workers: int, steps_total: int, num_iterations: int,
           training_phase: str, resume_play: str | None, resume_shop: str | None,
           minibatch_size: int = MINIBATCH_SIZE,
-          min_shop_steps: int = 0):
+          min_shop_steps: int = 0,
+          early_stop_patience: int = 0):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     steps_per_worker = max(1, steps_total // num_workers)
@@ -528,6 +529,8 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
     start_iter  = 0
     total_steps = 0
     best_ante   = 1
+    best_reward = -float("inf")
+    iters_without_improvement = 0
 
     # ── Load / init weights ───────────────────────────────────────────────
     if training_phase == "A":
@@ -737,6 +740,7 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
         ante_dist = {}
         win_rate  = 0.0
         mean_reward = 0.0
+        iter_best = 1
         if iter_episodes:
             mean_reward = np.mean([e["reward"] for e in iter_episodes])
             wins = sum(1 for e in iter_episodes if e.get("won", False))
@@ -811,6 +815,24 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
             ep["iteration"] = iteration + 1
         episode_log.extend(iter_episodes)
 
+        # ── Early stopping ────────────────────────────────────────────────
+        if early_stop_patience > 0:
+            improved = False
+            if iter_best > best_ante:
+                improved = True
+            elif mean_reward > best_reward + 0.1:  # meaningful reward improvement
+                improved = True
+            if mean_reward > best_reward:
+                best_reward = mean_reward
+            if improved:
+                iters_without_improvement = 0
+            else:
+                iters_without_improvement += 1
+            if iters_without_improvement >= early_stop_patience:
+                print(f"\n*** EARLY STOP: no improvement for {early_stop_patience} iters "
+                      f"(best_ante={best_ante}, best_reward={best_reward:.2f}) ***")
+                break
+
         # ── Checkpoint every 10 iters ─────────────────────────────────────
         if (iteration + 1) % 10 == 0:
             play_ckpt = CKPT_DIR / f"iter_{iteration+1:04d}_play.pt"
@@ -868,6 +890,8 @@ if __name__ == "__main__":
                         help="Minibatch size for PPO update (default: 128)")
     parser.add_argument("--min-shop-steps", type=int, default=200,
                         help="Minimum shop steps to collect per iteration across all workers (default: 200)")
+    parser.add_argument("--early-stop", type=int, default=0,
+                        help="Stop if no improvement for N iters (0=disabled, default: 0)")
     args = parser.parse_args()
 
     train(
@@ -879,4 +903,5 @@ if __name__ == "__main__":
         resume_shop     = args.resume_shop,
         minibatch_size  = args.minibatch,
         min_shop_steps  = args.min_shop_steps,
+        early_stop_patience = args.early_stop,
     )
