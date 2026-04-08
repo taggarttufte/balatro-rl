@@ -46,7 +46,8 @@ GAMMA          = 0.99
 LAMBDA         = 0.95
 CLIP           = 0.2
 ENTROPY_COEFF       = 0.03   # shop agent — higher to prevent early collapse with sparse data
-ENTROPY_COEFF_PLAY  = 0.05   # play agent — higher to prevent collapse with pretrained weights
+ENTROPY_COEFF_PLAY  = 0.01   # play agent — match V4 (0.05 was too high for from-scratch)
+ENTROPY_FLOOR_SHOP  = 0.3    # minimum shop entropy — prevents collapse to deterministic policy
 VF_COEFF       = 0.5
 GRAD_CLIP      = 0.5
 N_EPOCHS       = 10
@@ -161,6 +162,9 @@ class PlayActorCritic(nn.Module):
 
         nn.init.orthogonal_(self.embed[0].weight, gain=np.sqrt(2))
         nn.init.constant_(self.embed[0].bias, 0)
+        # Zero-init the comm vector columns so all-zero comm input = no effect
+        with torch.no_grad():
+            self.embed[0].weight[:, PLAY_OBS_BASE:] = 0.0
         nn.init.orthogonal_(self.actor.weight,  gain=0.01)
         nn.init.constant_(self.actor.bias,  0)
         nn.init.orthogonal_(self.critic.weight, gain=1.0)
@@ -442,7 +446,8 @@ def _worker_fn(worker_id: int, steps_target: int,
 
 def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, device,
                minibatch_size: int = MINIBATCH_SIZE, is_shop: bool = False,
-               entropy_coeff: float = ENTROPY_COEFF):
+               entropy_coeff: float = ENTROPY_COEFF,
+               entropy_floor: float = 0.0):
     """Run PPO update. Returns (total_loss, pg_loss, vf_loss, entropy)."""
     obs_b  = torch.FloatTensor(obs_b).to(device)
     act_b  = torch.LongTensor(act_b).to(device)
@@ -485,7 +490,12 @@ def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, de
             loss_pg  = -torch.min(ratio * adv_mb,
                                   torch.clamp(ratio, 1-CLIP, 1+CLIP) * adv_mb).mean()
             loss_vf  = nn.functional.mse_loss(values, ret_b[mb])
-            loss     = loss_pg + VF_COEFF * loss_vf - entropy_coeff * entropy
+            # Entropy bonus with optional floor: if entropy drops below floor,
+            # scale up the coefficient to push it back (prevents collapse)
+            ent_coeff = entropy_coeff
+            if entropy_floor > 0 and entropy.item() < entropy_floor:
+                ent_coeff = entropy_coeff * 3.0  # triple bonus when below floor
+            loss     = loss_pg + VF_COEFF * loss_vf - ent_coeff * entropy
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(policy.parameters(), GRAD_CLIP)
@@ -713,6 +723,7 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
             shop_loss, _, _, shop_ent = ppo_update(
                 shop_net, shop_optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b,
                 device, minibatch_size=minibatch_size, is_shop=True,
+                entropy_floor=ENTROPY_FLOOR_SHOP,
             )
             shop_weights = {k: v.cpu() for k, v in shop_net.state_dict().items()}
 

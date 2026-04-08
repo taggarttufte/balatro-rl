@@ -319,6 +319,12 @@ class BalatroSimEnvV5(gym.Env):
                     reward += R_SCORE_PROGRESS * math.log1p(delta) * 100
 
                 if new_state == State.SHOP:
+                    # Initialize quality baseline for this shop visit
+                    self._prev_quality = loadout_quality(
+                        game.jokers,
+                        [game.planet_levels.get(ht, 1) for ht in HAND_TYPES],
+                        game.deck,
+                    )
                     if (game.ante, game.blind_idx) != (prev_ante, prev_blind):
                         was_boss = (prev_blind == 2)
                         reward += R_BLIND_BASE * (9 - prev_ante)
@@ -347,7 +353,6 @@ class BalatroSimEnvV5(gym.Env):
                         game.step({"type": "use_consumable",
                                    "cons_idx": cons_idx, "target_indices": []})
 
-        return reward
         return reward
 
     # ── Shop step ─────────────────────────────────────────────────────────────
