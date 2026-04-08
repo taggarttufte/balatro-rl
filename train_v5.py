@@ -262,10 +262,16 @@ def compute_gae(rewards, values, dones, next_value):
 # ════════════════════════════════════════════════════════════════════════════
 
 def _worker_fn(worker_id: int, steps_target: int,
-               conn: mp.connection.Connection, seed_base: int):
+               conn: mp.connection.Connection, seed_base: int,
+               min_shop_steps: int = 0):
     """
     Runs in a separate process. Collects play and shop rollouts, sends both to main.
     Receives updated weight dicts for both policies each iteration.
+
+    Asymmetric collection: keeps running until BOTH conditions are met:
+      1. At least steps_target total steps collected
+      2. At least min_shop_steps shop steps collected
+    Hard cap at 8x steps_target to prevent runaway iterations.
     """
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -290,12 +296,47 @@ def _worker_fn(worker_id: int, steps_target: int,
         play_rollout: list[dict] = []
         shop_rollout: list[dict] = []
         episodes: list[dict] = []
-        deadline = time.time() + 60
+        deadline = time.time() + 180  # 3 min timeout for asymmetric collection
         MAX_EP_STEPS = 4000  # truncate long episodes so shop gets exposure
+        max_total_steps = steps_target * 16  # hard cap to prevent runaway
+        total_collected = 0
 
-        for _ in range(steps_target):
+        # Track steps since last shop visit to detect long play-only streaks
+        steps_since_shop = 0
+        # Force-reset threshold: if we haven't seen shop in this many steps
+        # AND we still need shop data, reset the episode to get a fresh start
+        SHOP_DROUGHT_LIMIT = 200
+
+        while True:
+            # Termination: enough of both types, or hard limits hit
+            have_enough_shop = len(shop_rollout) >= min_shop_steps
+            have_enough_total = total_collected >= steps_target
+            if have_enough_total and have_enough_shop:
+                break
+            if total_collected >= max_total_steps:
+                break
             if time.time() > deadline:
                 break
+
+            # Force-reset if we're in a long play streak and still need shop data
+            # Triggers regardless of play data — shop data is the bottleneck
+            if (not have_enough_shop and steps_since_shop >= SHOP_DROUGHT_LIMIT):
+                # End current episode and start fresh to get shop exposure
+                episodes.append({
+                    "steps":   ep_steps,
+                    "ante":    getattr(env.game, "ante", 1),
+                    "reward":  ep_reward,
+                    "dollars": getattr(env.game, "dollars", 0),
+                    "won":     False,
+                })
+                # Mark last play transition as done so GAE terminates properly
+                if play_rollout and play_rollout[-1]["done"] == 0.0:
+                    play_rollout[-1]["done"] = 1.0
+                obs, info = env.reset()
+                ep_steps = 0
+                ep_reward = 0.0
+                steps_since_shop = 0
+                continue
 
             agent = info["agent"]
 
@@ -307,6 +348,7 @@ def _worker_fn(worker_id: int, steps_target: int,
 
                 next_obs, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
+                steps_since_shop += 1
 
                 play_rollout.append({
                     "obs":      obs.copy(),
@@ -347,9 +389,11 @@ def _worker_fn(worker_id: int, steps_target: int,
                     "value":    value,
                     "mask":     mask.copy(),
                 })
+                steps_since_shop = 0
 
             ep_steps  += 1
             ep_reward += reward
+            total_collected += 1
 
             if ep_steps >= MAX_EP_STEPS:
                 done = True
@@ -366,6 +410,7 @@ def _worker_fn(worker_id: int, steps_target: int,
                 next_obs, info = env.reset()
                 ep_steps  = 0
                 ep_reward = 0.0
+                steps_since_shop = 0
 
             obs = next_obs
 
@@ -461,7 +506,8 @@ def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, de
 
 def train(num_workers: int, steps_total: int, num_iterations: int,
           training_phase: str, resume_play: str | None, resume_shop: str | None,
-          minibatch_size: int = MINIBATCH_SIZE):
+          minibatch_size: int = MINIBATCH_SIZE,
+          min_shop_steps: int = 0):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     steps_per_worker = max(1, steps_total // num_workers)
@@ -556,11 +602,13 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
     workers: list[mp.Process] = []
     conns_main: list[mp.connection.Connection] = []
 
+    min_shop_per_worker = max(1, min_shop_steps // num_workers)
+
     for wid in range(num_workers):
         conn_main, conn_worker = mp.Pipe()
         p = mp.Process(
             target=_worker_fn,
-            args=(wid, steps_per_worker, conn_worker, seed_base),
+            args=(wid, steps_per_worker, conn_worker, seed_base, min_shop_per_worker),
             daemon=True,
         )
         p.start()
@@ -572,7 +620,7 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
     print(f"\n{'='*60}")
     print(f"train_v5.py — Dual-Agent PPO (Phase {training_phase})")
     print(f"  workers={num_workers}  steps/iter={steps_total}  "
-          f"steps/worker={steps_per_worker}")
+          f"steps/worker={steps_per_worker}  min_shop/worker={min_shop_per_worker}")
     print(f"  minibatch={minibatch_size}  epochs={N_EPOCHS}")
     print(f"  play: obs={PLAY_OBS_DIM} act={PLAY_N_ACTIONS} params={play_params:,}"
           f"  {'(frozen)' if training_phase == 'A' else '(training)'}")
@@ -735,9 +783,10 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
                     shop_dist_str = " ".join(f"{shop_action_names.get(i,i)}:{p:.2f}" for i,p in top5_shop)
                     action_log_str += f"\n  SHOP top5:  {shop_dist_str}"
 
+        shop_pct = shop_steps / max(play_steps + shop_steps, 1) * 100
         status = (
             f"[{total_steps/1e6:.3f}M] iter={iteration+1:<5d} "
-            f"sps={sps:<8.0f} steps=({play_steps}p+{shop_steps}s) eps={eps:<4d} "
+            f"sps={sps:<8.0f} steps=({play_steps}p+{shop_steps}s={shop_pct:.0f}%s) eps={eps:<4d} "
             f"rew={mean_reward:<6.2f} wr={win_rate:.2f} "
             f"p_loss={play_loss:.4f} s_loss={shop_loss:.4f} "
             f"p_ent={play_ent:.4f} s_ent={shop_ent:.4f} "
@@ -806,6 +855,8 @@ if __name__ == "__main__":
                         help="Path to shop agent checkpoint")
     parser.add_argument("--minibatch",       type=int, default=MINIBATCH_SIZE,
                         help="Minibatch size for PPO update (default: 128)")
+    parser.add_argument("--min-shop-steps", type=int, default=200,
+                        help="Minimum shop steps to collect per iteration across all workers (default: 200)")
     args = parser.parse_args()
 
     train(
@@ -816,4 +867,5 @@ if __name__ == "__main__":
         resume_play     = args.resume_play,
         resume_shop     = args.resume_shop,
         minibatch_size  = args.minibatch,
+        min_shop_steps  = args.min_shop_steps,
     )

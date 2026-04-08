@@ -10,8 +10,9 @@ import numpy as np
 from pathlib import Path
 
 LOGS = [
-    ("Run 3 — 4k batch, 345k params",   "logs_sim/training_sim_run3.log",  "#3fb950"),
-    ("Run 4 — 32k batch, 345k params",  "logs_sim/training_sim_run4.log",  "#f0883e"),
+    ("Run 5 — 8k, 6-layer, flat rewards",           "logs_sim/training_sim_run5.log",  "#bc8cff"),
+    ("Run 6 — 8k, 6-layer, inverse rewards",        "logs_sim/training_sim_run6.log",  "#f0883e"),
+    ("Run 6b — resumed iters 1001-2000",             "logs_sim/training_sim_run6b.log", "#f7c948"),
 ]
 
 PAT = re.compile(

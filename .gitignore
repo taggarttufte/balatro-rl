@@ -17,8 +17,10 @@ logs_ray_socket/
 checkpoints/
 checkpoints_v3/
 checkpoints_sim/
+checkpoints_v5/
 logs_sim/
 *.log
+*.bundle
 
 # Keep plot scripts but not generated PNGs
 *.png
