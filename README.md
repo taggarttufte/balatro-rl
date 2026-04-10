@@ -2,7 +2,7 @@
 
 A reinforcement learning agent that learns to play [Balatro](https://www.playbalatro.com/) using PPO.
 
-Six versions over four months: from a Lua mod with file-based IPC, through socket parallelism and a failed dual-agent experiment, to a complete Python simulation with a single-agent PPO reaching **2% win rate** across millions of unique seeds. V7 (strategic card selection) is next.
+Six versions over four months: from a Lua mod with file-based IPC, through socket parallelism and a failed dual-agent experiment, to a complete Python simulation with a single-agent PPO reaching **1.9% win rate** on random seeds with a fully audited simulator. V7 (strategic card selection) is next.
 
 > **Disclaimer:** Balatro is a product of LocalThunk/Playstack. This is an unofficial project for research and educational purposes only.
 
@@ -34,10 +34,12 @@ A skilled human wins ~70% of runs. Random play wins <0.01%.
 | V1 | File IPC, SB3 | 1 Balatro instance | <0.01% | Proof of concept |
 | V2 | File IPC, Ray | 8 Balatro instances | <0.01% | Parallelism works but IPC is the bottleneck |
 | V3 | Socket IPC, custom PPO | 8 Balatro instances | <0.01% | RAM degradation kills live-game training |
-| V4 | Python sim, single agent | 16 workers | 0.47% | Sim works, combo ranking helps enormously |
+| V4 | Python sim, single agent | 16 workers | inflated* | Sim works, combo ranking helps enormously |
 | V5 | Python sim, dual agent | 16 workers | 0% | Shop starvation is structural -- failed after 12 runs |
-| **V6** | **Python sim, single agent** | **16 workers** | **2.0%** | **Sim audit + heuristic rewards, combo ranker is the ceiling** |
+| **V6** | **Python sim, single agent** | **16 workers** | **1.9%** | **Sim audit + heuristic rewards, combo ranker is the ceiling** |
 | V7 | TBD | TBD | Target: 30% | Strategic card selection + long-horizon planning |
+
+*V4 produced 35k+ wins across 6 training runs, but all results were inflated by two issues discovered later in V6: (1) fixed seeds caused memorization (agent won on ~16k unique seeds out of 2^31 possible), and (2) the Burglar joker was incorrectly implemented as a scaling mult engine (+3 mult/hand, accumulating permanently) instead of a hand modifier (+3 hands, -3 discards). The agent's dominant strategy (Burglar + Green Joker + Space Joker producing 612M chip Pairs) was entirely a training artifact. **V6 Run 6 (1.9% win rate) is the first legitimate measurement** -- random seeds, fully audited sim, no broken jokers.
 
 ### Throughput Progression
 
@@ -64,7 +66,7 @@ V5's dual-agent architecture (separate play + shop networks with a 32-dim commun
 
 3. **Heuristic shop rewards** -- +0.3 for buying jokers, +0.2 for using planets, -0.2 for leaving with buyable jokers and empty slots, -0.02/dollar wasted above interest cap, -0.5 for selling jokers with open slots and no upgrade target.
 
-4. **Random seeds per episode** -- V4 used 16 fixed seeds and the agent memorized them (19k wins on only 117 unique seeds). V6 randomizes every episode.
+4. **Random seeds per episode** -- V4 used fixed seeds per worker. Across all V4 runs the agent accumulated 35k+ wins, but on a limited pool of memorized seeds. V6 randomizes every episode for true generalization.
 
 5. **Full simulation audit** -- 32 joker fixes (~30% of implementations were wrong), 3 non-joker fixes. Burglar was implemented as a scaling mult joker instead of a hand modifier, which made the agent's entire winning strategy (Burglar + Green Joker + Space Joker) a training artifact.
 
@@ -142,45 +144,38 @@ Device: CUDA (RTX 3080 Ti for PPO updates)
 
 ## V6 Training Runs
 
-### Run 1 -- Fixed Seeds (baseline)
+> **Note on win rates:** Runs 1-4 used the broken Burglar joker (see Run 5). Their win rates
+> are inflated and not comparable to Run 6. Runs 1 also used fixed seeds (memorization).
+> **Run 6 is the only legitimate measurement.**
 
-**Config:** 16 workers, 4096 steps/iter, fixed seeds | **Result:** Ante 9, 19k wins
+### Runs 1-4 -- Pre-Burglar Fix (inflated results)
 
-The agent discovered Green Joker + Burglar + Space Joker synergy (33%/31%/26% of wins), playing Pairs (48%) and Two Pairs (21%). Reached ante 9 by iteration ~3. But only 117 unique seeds across all wins -- heavy memorization.
+| Run | Seeds | Config | Result | Notes |
+|-----|-------|--------|--------|-------|
+| 1 | Fixed | 4k batch | 19k wins, ante 9 | Seed memorization (117 unique seeds) |
+| 2 | Random | 32k batch | Ante 9 by iter 4 | First generalization attempt, killed for boss fix |
+| 3 | Random | 32k batch | 2.5% win rate | Boss blind loop fix applied, 70% die at ante 1 |
+| 4 | Random | 32k batch | Killed iter 117 | Added money/sell penalties, killed for Burglar fix |
 
-### Run 2 -- Random Seeds
+All runs used the broken Burglar joker. The agent's dominant strategy (Burglar + Green Joker + Space Joker, producing 612M chip Pairs) was entirely a training artifact.
 
-**Config:** 16 workers, 32k steps/iter, random seeds | **Result:** Ante 9 by iter 4, reward +98 by iter 15
+### Run 5 -- Burglar Bug Fix (hard reset)
 
-First run with true generalization. Entropy stayed healthy at 2.5-2.7. Killed to apply boss blind loop fixes.
+**Discovery:** Burglar was implemented as a scaling mult joker (+3 mult/hand played, accumulating permanently) instead of a hand modifier (+3 hands, -3 discards per blind). Combined with Green Joker and Space Joker, this produced 612 million chip Pairs by ante 8.
 
-### Run 3 -- Boss Blind Loop Fix
+**Impact:** The agent's entire winning strategy was built on a broken joker. All previous win rates (V4 and V6 runs 1-4) were inflated. Hard reset of learning.
 
-Fixed bl_mouth/bl_eye infinite loops (4% of seeds previously stuck). Combo ranker now filters boss-restricted combos.
-
-**Result:** 2.5% win rate, 70% die on ante 1 boss. Agent averaged $5 at game end. Only 1.5 jokers in winning runs. Killed for reward tuning.
-
-### Run 4 -- Excess Money + Sell Blunder Penalties
-
-Added -0.02/dollar waste and -0.5 sell blunder. Killed at iter 117 when the Burglar bug was discovered.
-
-### Run 5 -- Burglar Bug Fix
-
-**Discovery:** Burglar was implemented as a scaling mult joker (+3 mult/hand played, accumulating permanently) instead of a hand modifier (+3 hands, -3 discards per blind). Combined with Green Joker and Space Joker, this produced 612 million chip Pairs by ante 8. The agent's entire winning strategy was built on a broken joker.
-
-**Impact:** Hard reset of learning. All previous win rates were inflated.
-
-### Run 6 -- Full Sim Audit + Card Counting (final V6 run)
+### Run 6 -- Full Sim Audit + Card Counting (first legitimate measurement)
 
 **32 joker fixes** across 6 modules (~30% of implementations wrong): 7 completely wrong effects, 8 additive->multiplicative corrections, 13 other fixes, 4 stubs implemented. Also fixed Lucky enhancement probability (1/5 -> 1/4), Stone card scoring, and passive joker accumulation bugs.
 
-**Result:** 1.9-2.0% win rate, converged by iter ~100. Green Joker (51%) + Space Joker (45%) still dominant. Killed at iter 287.
+**Result: 1.9% win rate** (9,031 wins / 476,930 episodes), converged by iter ~100, random seeds, fully audited sim. Green Joker (51%) + Space Joker (45%) still dominant. Killed at iter 287.
 
 **Conclusion:** The combo ranker IS the policy ceiling. The agent converges to "always play action 0" (best combo) within 50 iterations. It cannot learn strategic discarding because card selection is automated. 80% of games die at ante 1 boss blind (600 chips, 4 hands, no jokers) -- a human survives this 95%+ of the time by discarding intelligently.
 
 ---
 
-## Why 2% Is the Ceiling
+## Why 1.9% Is the Ceiling
 
 | Problem | Why It Matters |
 |---------|---------------|
@@ -231,7 +226,7 @@ Test suite: **504 tests passing** across joker behavior, scoring, boss blinds, g
 
 ### Training
 
-**Seed diversity prevents memorization.** 16 fixed seeds -> 117 unique winning seeds. Random seeds per episode -> true generalization.
+**Seed diversity prevents memorization.** V4's fixed seeds produced 35k+ wins but on a limited pool of memorized games. Random seeds per episode forces true generalization across millions of unique configurations.
 
 **Heuristic reward shaping bootstraps learning.** Dense rewards for smart shop actions give signal from step 1. The agent can surpass the heuristic as it trains.
 
