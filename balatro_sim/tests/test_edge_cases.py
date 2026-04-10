@@ -149,8 +149,11 @@ class TestHandEvalEdgeCases:
         ]
         ht, scoring = evaluate_hand(cards)
         assert ht == "Three of a Kind"
-        assert not any(c.enhancement == "Stone" and c.rank != 5 for c in scoring
-                       if c.enhancement == "Stone")
+        # Stone cards are excluded from hand type eval but included in scoring_cards
+        # (they contribute +50 chips each when scored)
+        assert any(c.enhancement == "Stone" for c in scoring)
+        # The three 5s should be in scoring too
+        assert sum(1 for c in scoring if c.rank == 5) == 3
 
     # 10 — Stone card always scores (contributes +50 chips) even with no hand type
     def test_stone_card_contributes_chips(self):

@@ -90,6 +90,11 @@ def get_action_mask(env: BalatroSimEnv) -> np.ndarray:
         if gs.free_rerolls_remaining > 0 or gs.dollars >= reroll_cost:
             mask[44] = True                         # reroll
         mask[45] = True                             # leave shop (always valid)
+        # Consumable usage in shop (planets only — safe to use without targets)
+        from balatro_sim.consumables import ALL_PLANETS as _AP
+        for i, key in enumerate(gs.consumable_hand[:2]):
+            if key in _AP:
+                mask[28 + i] = True                 # use planet in shop
 
     elif gs.state == State.GAME_OVER:
         mask[45] = True  # dummy action to unstick terminal state
@@ -200,11 +205,12 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
     Runs in a separate process. Collects rollouts and sends them to main.
     Receives updated weights before each rollout cycle.
     """
-    import os
+    import os, random as _random_mod
     # Prevent worker from using CUDA
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    _rng = _random_mod.Random(seed_base + worker_id * 1000)
 
-    envs    = [BalatroSimEnv(seed=seed_base + worker_id * 100 + i) for i in range(n_envs)]
+    envs    = [BalatroSimEnv(seed=_rng.randint(0, 2**31 - 1)) for i in range(n_envs)]
     policy  = ActorCritic().cpu().eval()
 
     obs_list   = [e.reset()[0] for e in envs]
@@ -250,13 +256,20 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                 ep_steps[i]  += 1
                 ep_reward[i] += reward
 
+                # Truncate very long episodes to ensure turnover
+                if not done and ep_steps[i] >= 2000:
+                    done = True
+
                 if done:
                     episodes.append({
                         "steps":   ep_steps[i],
                         "ante":    info.get("ante", 1),
                         "reward":  ep_reward[i],
                         "dollars": info.get("dollars", 0),
+                        "won":     info.get("ante", 1) > 8,
                     })
+                    # Randomize seed each episode for generalization
+                    env._seed = _rng.randint(0, 2**31 - 1)
                     next_obs, _ = env.reset()
                     ep_steps[i]  = 0
                     ep_reward[i] = 0.0

@@ -30,7 +30,7 @@ import torch.optim as optim
 
 from balatro_sim.env_v5 import (
     BalatroSimEnvV5,
-    PLAY_OBS_DIM, SHOP_OBS_DIM, PLAY_N_ACTIONS, SHOP_N_ACTIONS, COMM_DIM,
+    PLAY_OBS_DIM, PLAY_OBS_BASE, SHOP_OBS_DIM, PLAY_N_ACTIONS, SHOP_N_ACTIONS, COMM_DIM,
     SUBSTATE_NORMAL, SUBSTATE_PACK_OPEN, SUBSTATE_PACK_TARGET,
     HAND_TYPES,
 )
@@ -46,8 +46,9 @@ GAMMA          = 0.99
 LAMBDA         = 0.95
 CLIP           = 0.2
 ENTROPY_COEFF       = 0.03   # shop agent — higher to prevent early collapse with sparse data
-ENTROPY_COEFF_PLAY  = 0.01   # play agent — match V4 (0.05 was too high for from-scratch)
+ENTROPY_COEFF_PLAY  = 0.01   # play agent — low is fine, best combo is the right action
 ENTROPY_FLOOR_SHOP  = 0.3    # minimum shop entropy — prevents collapse to deterministic policy
+ENTROPY_FLOOR_PLAY  = 0.0    # no play floor — let it exploit best combo
 VF_COEFF       = 0.5
 GRAD_CLIP      = 0.5
 N_EPOCHS       = 10
@@ -265,23 +266,38 @@ def compute_gae(rewards, values, dones, next_value):
 # Worker process
 # ════════════════════════════════════════════════════════════════════════════
 
+def _heuristic_play_action(env):
+    """Scripted play policy: always play the best combo, skip non-boss blinds.
+    Used by shop-focused workers to blaze through play phases and reach shops."""
+    gs = env.game
+    if gs.state == State.BLIND_SELECT:
+        return 30  # always play blind (don't skip — we want to reach shop via clearing)
+    elif gs.state == State.SELECTING_HAND:
+        mask = get_play_action_mask(env)
+        if mask[0]:
+            return 0   # play best combo
+        # Fallback: first valid action
+        valid = np.where(mask)[0]
+        return int(valid[0]) if len(valid) else 30
+    return 30
+
+
 def _worker_fn(worker_id: int, steps_target: int,
                conn: mp.connection.Connection, seed_base: int,
-               min_shop_steps: int = 0):
+               min_shop_steps: int = 0, shop_focused: bool = False):
     """
     Runs in a separate process. Collects play and shop rollouts, sends both to main.
     Receives updated weight dicts for both policies each iteration.
 
-    Asymmetric collection: keeps running until BOTH conditions are met:
-      1. At least steps_target total steps collected
-      2. At least min_shop_steps shop steps collected
-    Hard cap at 8x steps_target to prevent runaway iterations.
+    If shop_focused=True, uses a heuristic play policy (no neural net) to blaze
+    through play phases and maximize shop data collection. Play rollouts from
+    shop-focused workers are discarded (not sent to PPO).
     """
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     env = BalatroSimEnvV5(seed=seed_base + worker_id * 100)
-    play_policy = PlayActorCritic().cpu().eval()
+    play_policy = PlayActorCritic().cpu().eval() if not shop_focused else None
     shop_policy = ShopActorCritic().cpu().eval()
 
     obs, info = env.reset()
@@ -292,77 +308,61 @@ def _worker_fn(worker_id: int, steps_target: int,
         msg = conn.recv()
         if msg is None:
             break
-        play_policy.load_state_dict({k: v.cpu() for k, v in msg["play"].items()})
+        if play_policy is not None:
+            play_policy.load_state_dict({k: v.cpu() for k, v in msg["play"].items()})
+            play_policy.eval()
         shop_policy.load_state_dict({k: v.cpu() for k, v in msg["shop"].items()})
-        play_policy.eval()
         shop_policy.eval()
 
         play_rollout: list[dict] = []
         shop_rollout: list[dict] = []
         episodes: list[dict] = []
-        deadline = time.time() + 180  # 3 min timeout for asymmetric collection
-        MAX_EP_STEPS = 4000  # truncate long episodes so shop gets exposure
-        max_total_steps = steps_target * 16  # hard cap to prevent runaway
+        deadline = time.time() + 180  # 3 min timeout
+        MAX_EP_STEPS = 4000
         total_collected = 0
 
-        # Track steps since last shop visit to detect long play-only streaks
-        steps_since_shop = 0
-        # Force-reset threshold: if we haven't seen shop in this many steps
-        # AND we still need shop data, reset the episode to get a fresh start
-        SHOP_DROUGHT_LIMIT = 200
+        # Shop-focused workers collect more shop steps, normal workers cap play data
+        target_shop = min_shop_steps * (4 if shop_focused else 1)
+        play_cap = steps_target * 2  # cap play rollout size for PPO efficiency
 
         while True:
-            # Termination: enough of both types, or hard limits hit
-            have_enough_shop = len(shop_rollout) >= min_shop_steps
-            have_enough_total = total_collected >= steps_target
-            if have_enough_total and have_enough_shop:
+            have_enough_shop = len(shop_rollout) >= target_shop
+            have_enough_play = len(play_rollout) >= steps_target or shop_focused
+            if have_enough_play and have_enough_shop:
                 break
-            if total_collected >= max_total_steps:
+            if total_collected >= steps_target * 16:
                 break
             if time.time() > deadline:
                 break
 
-            # Force-reset if we're in a long play streak and still need shop data
-            # Triggers regardless of play data — shop data is the bottleneck
-            if (not have_enough_shop and steps_since_shop >= SHOP_DROUGHT_LIMIT):
-                # End current episode and start fresh to get shop exposure
-                episodes.append({
-                    "steps":   ep_steps,
-                    "ante":    getattr(env.game, "ante", 1),
-                    "reward":  ep_reward,
-                    "dollars": getattr(env.game, "dollars", 0),
-                    "won":     False,
-                })
-                # Mark last play transition as done so GAE terminates properly
-                if play_rollout and play_rollout[-1]["done"] == 0.0:
-                    play_rollout[-1]["done"] = 1.0
-                obs, info = env.reset()
-                ep_steps = 0
-                ep_reward = 0.0
-                steps_since_shop = 0
-                continue
-
             agent = info["agent"]
 
             if agent == "play":
-                mask   = get_play_action_mask(env)
-                obs_t  = torch.FloatTensor(obs).unsqueeze(0)
-                mask_t = torch.BoolTensor(mask).unsqueeze(0)
-                action, log_prob, value = play_policy.get_action(obs_t, mask_t)
+                if shop_focused:
+                    # Heuristic: no neural net, no rollout data
+                    action = _heuristic_play_action(env)
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
+                else:
+                    mask   = get_play_action_mask(env)
+                    obs_t  = torch.FloatTensor(obs).unsqueeze(0)
+                    mask_t = torch.BoolTensor(mask).unsqueeze(0)
+                    action, log_prob, value = play_policy.get_action(obs_t, mask_t)
 
-                next_obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                steps_since_shop += 1
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
 
-                play_rollout.append({
-                    "obs":      obs.copy(),
-                    "action":   action,
-                    "reward":   float(reward),
-                    "done":     float(done),
-                    "log_prob": log_prob,
-                    "value":    value,
-                    "mask":     mask.copy(),
-                })
+                    # Only append play data up to the cap
+                    if len(play_rollout) < play_cap:
+                        play_rollout.append({
+                            "obs":      obs.copy(),
+                            "action":   action,
+                            "reward":   float(reward),
+                            "done":     float(done),
+                            "log_prob": log_prob,
+                            "value":    value,
+                            "mask":     mask.copy(),
+                        })
 
             else:  # shop agent
                 substate = info["shop_substate"]
@@ -393,7 +393,6 @@ def _worker_fn(worker_id: int, steps_target: int,
                     "value":    value,
                     "mask":     mask.copy(),
                 })
-                steps_since_shop = 0
 
             ep_steps  += 1
             ep_reward += reward
@@ -414,22 +413,26 @@ def _worker_fn(worker_id: int, steps_target: int,
                 next_obs, info = env.reset()
                 ep_steps  = 0
                 ep_reward = 0.0
-                steps_since_shop = 0
 
             obs = next_obs
 
+        # Trim play rollout to cap for PPO efficiency (keep most recent)
+        if len(play_rollout) > play_cap:
+            play_rollout = play_rollout[-play_cap:]
+
         # Bootstrap values for GAE
         agent = info["agent"]
-        if agent == "play":
+        play_next_val = 0.0
+        shop_next_val = 0.0
+        if agent == "play" and play_policy is not None:
             mask_t = torch.BoolTensor(get_play_action_mask(env)).unsqueeze(0)
             obs_t  = torch.FloatTensor(obs).unsqueeze(0)
             play_next_val = play_policy.get_value(obs_t, mask_t)
-            shop_next_val = 0.0
-        else:
+        elif agent != "play":
             mask_t = torch.BoolTensor(get_shop_action_mask(env, info)).unsqueeze(0)
             obs_t  = torch.FloatTensor(obs).unsqueeze(0)
             shop_next_val = shop_policy.get_value(obs_t, mask_t)
-            play_next_val = 0.0
+        # If shop_focused and agent=="play", both bootstrap to 0.0 (no play data anyway)
 
         conn.send({
             "play_rollout":   play_rollout,
@@ -490,11 +493,12 @@ def ppo_update(policy, optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b, de
             loss_pg  = -torch.min(ratio * adv_mb,
                                   torch.clamp(ratio, 1-CLIP, 1+CLIP) * adv_mb).mean()
             loss_vf  = nn.functional.mse_loss(values, ret_b[mb])
-            # Entropy bonus with optional floor: if entropy drops below floor,
-            # scale up the coefficient to push it back (prevents collapse)
+            # Entropy bonus with floor: scale coefficient based on how far below
             ent_coeff = entropy_coeff
             if entropy_floor > 0 and entropy.item() < entropy_floor:
-                ent_coeff = entropy_coeff * 3.0  # triple bonus when below floor
+                # Scale from 1x (at floor) to 10x (at zero), smooth ramp
+                ratio_below = 1.0 - (entropy.item() / max(entropy_floor, 1e-6))
+                ent_coeff = entropy_coeff * (1.0 + 9.0 * ratio_below)
             loss     = loss_pg + VF_COEFF * loss_vf - ent_coeff * entropy
             optimizer.zero_grad()
             loss.backward()
@@ -611,17 +615,22 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
     episode_log: list[dict] = []
 
     # ── Spawn workers ─────────────────────────────────────────────────────
+    # Split workers: half normal (play+shop), half shop-focused (heuristic play)
     seed_base = int(time.time()) % 100000
     workers: list[mp.Process] = []
     conns_main: list[mp.connection.Connection] = []
 
+    n_shop_workers = num_workers // 2  # half dedicated to shop data
+    n_play_workers = num_workers - n_shop_workers
     min_shop_per_worker = max(1, min_shop_steps // num_workers)
 
     for wid in range(num_workers):
         conn_main, conn_worker = mp.Pipe()
+        is_shop_focused = (wid >= n_play_workers)
         p = mp.Process(
             target=_worker_fn,
-            args=(wid, steps_per_worker, conn_worker, seed_base, min_shop_per_worker),
+            args=(wid, steps_per_worker, conn_worker, seed_base,
+                  min_shop_per_worker, is_shop_focused),
             daemon=True,
         )
         p.start()
@@ -632,8 +641,8 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
     shop_params = sum(p.numel() for p in shop_net.parameters())
     print(f"\n{'='*60}")
     print(f"train_v5.py — Dual-Agent PPO (Phase {training_phase})")
-    print(f"  workers={num_workers}  steps/iter={steps_total}  "
-          f"steps/worker={steps_per_worker}  min_shop/worker={min_shop_per_worker}")
+    print(f"  workers={num_workers} ({n_play_workers} play + {n_shop_workers} shop-focused)  "
+          f"steps/iter={steps_total}  steps/worker={steps_per_worker}")
     print(f"  minibatch={minibatch_size}  epochs={N_EPOCHS}")
     print(f"  play: obs={PLAY_OBS_DIM} act={PLAY_N_ACTIONS} params={play_params:,}"
           f"  {'(frozen)' if training_phase == 'A' else '(training)'}")
@@ -712,6 +721,7 @@ def train(num_workers: int, steps_total: int, num_iterations: int,
                 play_net, play_optimizer, obs_b, act_b, ret_b, adv_b, logp_b, mask_b,
                 device, minibatch_size=minibatch_size, is_shop=False,
                 entropy_coeff=ENTROPY_COEFF_PLAY,
+                entropy_floor=ENTROPY_FLOOR_PLAY,
             )
             play_weights = {k: v.cpu() for k, v in play_net.state_dict().items()}
 

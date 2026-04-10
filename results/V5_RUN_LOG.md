@@ -72,29 +72,120 @@ Shop agent produces a 32-dim comm vector fed into play agent obs.
 
 ---
 
-## Run 9 (Phase B — scratch, leave penalty, higher shop entropy) ← CURRENT
+## Run 9 (Phase B — scratch, leave penalty, higher shop entropy)
 **Config:** Phase B, 1000 iters, scratch, MAX_EP_STEPS=4000, ENTROPY_COEFF=0.03 (shop), ENTROPY_COEFF_PLAY=0.05, R_LEAVE_SHOP=-0.1
-**Status:** ~230 iters in. Reward -1.18 → -0.23. Play entropy 1.6. Shop entropy 0.35-0.55 (better than run 8).
-**Shop action dist at iter 220:** leave=0.43, use0=0.35, reroll=0.07 — leave penalty working, shop not immediately leaving but pivoted to consumable use instead of buying.
-**Observations:** Leave probability staying ~0.43 instead of climbing to 0.8+. Leave penalty is working. But shop still not buying jokers meaningfully.
-**Next changes:** Bump R_QUALITY_SCALE (0.2 → 0.5), add R_SPEND reward for dollar spending.
+**Result:** ~230 iters. Reward -1.18 → -0.23. Play entropy 1.6. Shop entropy 0.35-0.55.
+**Shop action dist at iter 220:** leave=0.43, use0=0.35, reroll=0.07 — leave penalty working.
+**What happened:** Leave penalty helped but shop still not buying jokers. R_QUALITY_SCALE and R_SPEND were added to env_v5.py (bumped from 0.2→0.5, added 0.05/dollar). Run was stopped to apply combo scoring bug fix.
 
 ---
 
-## Structural Problems (carry forward to all runs)
-
-1. **Shop starvation:** Play/shop step ratio ~20:1 or worse as play improves. Shop agent gets insufficient training data. Options: replay buffer, dedicated shop workers, guaranteed min shop steps per iter.
-
-2. **Credit assignment gap:** Joker purchased at step 50 pays off at step 400+. PPO's GAE can't trace this. Options: reward shaping (quality delta), intrinsic reward for spending.
-
-3. **Entropy collapse:** Shop agent collapses to deterministic policy before getting meaningful signal. Fixed partially with ENTROPY_COEFF=0.03 and leave penalty.
-
-4. **Shop "leave bias":** Leaving is always safe (zero cost), buying has immediate cost and delayed reward. Agent learns leave=safe by default. Fixed partially with R_LEAVE_SHOP=-0.1.
+## Run 10 (Phase B — combo scoring bug fix, from scratch)
+**Config:** Phase B, 1000 iters, scratch, R_QUALITY_SCALE=0.5, R_SPEND=0.05, _prev_quality bug fixed
+**Result:** 280 iters completed. Reward -0.99 → +4.85. **46% blind clear rate.** Still 0 wins, 0 ante 2.
+**The breakthrough:** Discovered critical combo scoring bug in `_update_play_combos()`:
+```python
+# BROKEN — passes list of indices as all_cards, game object as hand_type
+score, _ = score_hand(cards, list(combo), gs)
+# Every call threw exception → score = 0 → all combos tied → random play
+```
+This single bug was why runs 1-9 never cleared ante 1. With the fix, the play agent
+immediately started scoring 300+ chips and clearing blinds.
+**Shop starvation persisted:** 0.1% of steps were shop steps. Play agent cleared blinds
+but never advanced past ante 1 (couldn't beat all 3 blinds in sequence without jokers).
 
 ---
 
-## Planned Next Changes
-- [ ] Bump R_QUALITY_SCALE: 0.2 → 0.5
-- [ ] Add R_SPEND: small reward proportional to dollars spent (0.05 * dollars_spent)
-- [ ] Implement shop replay buffer (keep last N shop experiences, sample for PPO updates)
-- [ ] Add more shop epochs (N_SHOP_EPOCHS=30 vs play's 10)
+## Run 11 (Phase B — heuristic shop rewards)
+**Config:** Phase B, 1000 iters, scratch + combo fix + heuristic rewards (R_HEUR_BUY_JOKER=0.3, R_HEUR_UPGRADE=0.5, R_HEUR_USE_PLANET=0.2, R_HEUR_LEAVE_EMPTY=-0.2)
+**Result:** 1000 iters completed (with restart at iter 280 after system reboot).
+
+**Two distinct phases:**
+- Iter 1-700: Healthy learning. Reward +1.5 → +4.85. Blind clear rate 6% → 46%.
+  Shop action dist: buy0=28%, buy1=23%, leave=45%. Agent actually buying jokers.
+- Iter 750+: **Complete collapse.** Both entropies hit 0.0. Shop steps dropped to 0.
+  Reward plateaued at +7.99 with "100% clears" but 0 ante 2. Agent converged to fixed
+  strategy: clear small+big blind, die on boss every time.
+
+**What happened:** Play agent mastered "always play best combo" (action 45 at 97%).
+Clears small/big blind reliably but can't beat boss (600 chips) without jokers. Shop
+agent completely collapsed because it got zero data for hundreds of iterations. The
+heuristic rewards gave signal when data existed but couldn't fix the volume problem.
+
+**15x overcollection problem discovered:** Requested 4096 steps/iter but collected 61,452
+due to asymmetric collection trying to meet min_shop_steps. PPO was processing 15x more
+data than intended, wasting ~30s/iter on unnecessary gradient steps.
+
+---
+
+## Run 12 (various configurations — all failed)
+Three sub-runs attempted to fix shop starvation with architectural changes:
+
+**12a: Shop-focused workers + play rollout cap**
+- Config: 8 play workers + 8 heuristic-play workers (scripted play, only collect shop data)
+- Result: Workers crashed — bootstrap GAE tried to pass play obs to shop policy.
+- Fix: Conditional bootstrap based on agent type.
+
+**12b: Fixed bootstrap + entropy floors**
+- Config: Same workers + ENTROPY_FLOOR_PLAY=0.3 + ENTROPY_FLOOR_SHOP=0.3
+- Result: Play entropy oscillated wildly (0.02 ↔ 1.8). NaN losses by iter 40.
+- What happened: Direct entropy floor penalty `(floor - entropy) * 2.0` destabilized
+  gradient. Removed in favor of smooth coefficient ramp.
+
+**12c: Smooth entropy ramp + no play floor**
+- Config: Shop-focused workers, ENTROPY_COEFF_PLAY=0.01 (no floor), shop floor only
+- Result: Reward stuck at +1.85, 0.2% blind clears. Heuristic workers generated short
+  episodes that diluted the reward signal. Play agent trained on half the data (only 8
+  workers contributing play rollouts).
+- What happened: Shop-focused workers helped the shop agent (buy0=49%, sell0=20%) but
+  starved the play agent. The worker split hurt overall performance vs Run 11.
+
+---
+
+## V5 Post-Mortem
+
+### Why V5 failed
+
+The dual-agent architecture created an **irreconcilable data imbalance**. The game's
+natural play/shop step ratio is ~20:1, worsening as the play agent improves (longer
+episodes = fewer shop resets). Every mitigation attempted had a corresponding cost:
+
+| Fix Attempted | Helped | Hurt |
+|---------------|--------|------|
+| Min shop steps per iter | Shop got more data | Play overcollected 15x, slow iters |
+| Shop-focused workers | Shop agent learned to buy | Play agent lost half its training data |
+| Entropy floors (play) | Prevented play collapse | Fought natural gradient, degraded play |
+| Entropy floors (shop) | Prevented shop collapse | Couldn't fix zero-data problem |
+| Heuristic shop rewards | Dense signal for shop | Couldn't overcome data volume issue |
+| Quality delta reward | Shorter credit horizon | Required shop data to compute |
+| Leave penalty | Reduced leave-immediately bias | Agent pivoted to other no-ops |
+| Force-reset on drought | Generated shop episodes | Reset episodes had $4 and no jokers |
+
+### The fundamental tension
+
+Play agent needs massive data (65k steps/iter) to learn. Shop agent needs data it
+almost never gets organically (0.1% of steps). Capping play data starves play.
+Dedicated shop workers dilute play training. There is no configuration of the
+dual-agent architecture that satisfies both simultaneously.
+
+### What would have been needed
+
+For dual-agent to work, the shop agent would need to be **pretrained** before joint
+training begins — either via supervised imitation of a heuristic, or by training a
+single agent first (V6) and transferring its shop knowledge. This is exactly the
+approach V6 enables as a future upgrade path.
+
+### Bugs discovered during V5
+
+1. **Combo scoring bug** (`env_v5.py:793`): `score_hand(cards, list(combo), gs)` passed
+   wrong argument types. All combos scored 0. Root cause of runs 1-9 failing.
+2. **j_card_sharp override** (`jokers/chips.py`): No-op stub overwrote misc.py's working
+   implementation due to import order.
+3. **_prev_quality not set on skip** (`env_v5.py`): Quality baseline wasn't initialized
+   when skipping a blind entered the shop, causing wrong quality delta rewards.
+
+### V5 is deprecated
+
+V5 code is preserved in `env_v5.py` and `train_v5.py` for potential future use
+(weight transfer from V6, pretrained shop agent experiments). Active development
+moved to V6 (single agent with enhanced shop obs) on 2026-04-09.

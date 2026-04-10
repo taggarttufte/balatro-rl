@@ -103,13 +103,17 @@ PLANET_FEATURES= 12
 CONS_FEATURES  = 8     # per consumable slot
 N_CONS_SLOTS   = 2
 
+# Shop context features (new — richer shop state for informed buying decisions)
+SHOP_CONTEXT   = 60    # reroll(2) + vouchers(27) + boss(15) + deck_comp(8) + enhance(8)
+
 OBS_DIM = (GAME_SCALARS
            + N_HAND_SLOTS  * CARD_FEATURES
            + N_JOKER_SLOTS * JOKER_FEATURES
            + N_SHOP_SLOTS  * SHOP_FEATURES
            + PLANET_FEATURES
-           + N_CONS_SLOTS  * CONS_FEATURES)
-# = 14 + 208 + 50 + 42 + 12 + 16 = 342
+           + N_CONS_SLOTS  * CONS_FEATURES
+           + SHOP_CONTEXT)
+# = 14 + 208 + 50 + 42 + 12 + 16 + 60 = 402
 
 # Reward constants
 # Blind clear reward scales inversely with ante: ante 1 = 16.0, ante 8 = 2.0
@@ -119,6 +123,13 @@ R_ANTE_COMPLETE  = 5.0
 R_WIN            = 50.0   # bumped from 20 — winning is still the dominant signal
 R_LOSE           = -2.0
 R_SCORE_PROGRESS = 0.05   # per 1% progress increment
+
+# Heuristic shop reward shaping (mirrors V4 Lua shop heuristic)
+R_HEUR_BUY_JOKER   = 0.3   # bought a joker into an empty slot
+R_HEUR_USE_PLANET   = 0.2   # used a planet card (free hand upgrade)
+R_HEUR_LEAVE_EMPTY  = -0.2  # left shop with affordable jokers and empty slots
+R_HEUR_WASTE_MONEY  = -0.02 # per dollar over $25 (interest cap) when leaving shop
+                             # holding $25 = max interest, anything above is wasted potential
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -248,19 +259,61 @@ class BalatroSimEnv(gym.Env):
         elif state == State.SHOP:
             if 32 <= action <= 38:
                 idx = action - 32
+                n_jokers_before = len(gs.jokers)
                 gs.step({"type": "buy", "item_idx": idx})
+                # Heuristic: bonus for buying a joker
+                if len(gs.jokers) > n_jokers_before:
+                    reward += R_HEUR_BUY_JOKER
 
             elif 39 <= action <= 43:
                 j_idx = action - 39
+                # Penalize selling when you have open slots — almost always a blunder
+                # Exception: selling to afford a much better joker (checked by
+                # whether a shop joker costs more than current dollars)
+                if j_idx < len(gs.jokers) and len(gs.jokers) <= gs.joker_slots:
+                    has_expensive_upgrade = any(
+                        i.kind == "joker" and not i.sold
+                        and i.discounted_price(gs.shop_discount) > gs.dollars
+                        for i in gs.current_shop
+                    )
+                    if not has_expensive_upgrade:
+                        reward += -0.5  # clear blunder — selling with open slots for no reason
                 gs.step({"type": "sell_joker", "joker_idx": j_idx})
 
             elif action == 44:
                 gs.step({"type": "reroll"})
 
             elif action == 45:
+                # Heuristic: penalize leaving with affordable jokers and empty slots
+                if len(gs.jokers) < gs.joker_slots:
+                    affordable = any(
+                        i.kind == "joker" and not i.sold
+                        and gs.dollars >= i.discounted_price(gs.shop_discount)
+                        for i in gs.current_shop
+                    )
+                    if affordable:
+                        reward += R_HEUR_LEAVE_EMPTY
+                # Penalize wasted money above the nearest $5 interest boundary
+                # Interest: $1 per $5, cap at $25. So optimal is to spend down
+                # to the nearest $5 (e.g. $9 -> spend $4, keep $5 for interest)
+                # Above $25, ALL excess is waste (interest capped)
+                interest_floor = min(gs.dollars // 5 * 5, 25)
+                wasted = gs.dollars - interest_floor
+                if wasted > 0:
+                    reward += R_HEUR_WASTE_MONEY * wasted
                 gs.step({"type": "leave_shop"})
                 self._auto_advance()
                 self._update_play_combos()
+
+            elif action in (28, 29):
+                # Use consumable in shop (planets)
+                c_idx = action - 28
+                if c_idx < len(gs.consumable_hand):
+                    from .consumables import ALL_PLANETS as _AP
+                    if gs.consumable_hand[c_idx] in _AP:
+                        gs.step({"type": "use_consumable",
+                                 "consumable_idx": c_idx, "target_cards": []})
+                        reward += R_HEUR_USE_PLANET
 
         # ── Auto-advance non-decision states ─────────────────────────────
         self._auto_advance()
@@ -443,7 +496,7 @@ class BalatroSimEnv(gym.Env):
             idx += 1
 
         # ── Consumable hand (2 × 8 = 16) ──────────────────────────────────
-        from .consumables import PLANET_HAND, ALL_TAROTS, ALL_SPECTRALS
+        from .consumables import PLANET_HAND, ALL_TAROTS, ALL_SPECTRALS, ALL_VOUCHERS
         for slot in range(N_CONS_SLOTS):
             if slot < len(gs.consumable_hand):
                 key = gs.consumable_hand[slot]
@@ -460,13 +513,81 @@ class BalatroSimEnv(gym.Env):
                 obs[idx+7] = float(gs.state == State.SELECTING_HAND)
             idx += CONS_FEATURES
 
+        # ── Shop context (60) — richer features for informed shop decisions ──
+
+        # Reroll info (2)
+        reroll_cost = max(0, gs.reroll_cost - gs.reroll_discount)
+        obs[idx]   = min(reroll_cost, 10) / 10.0
+        obs[idx+1] = gs.free_rerolls_remaining / max(gs.free_rerolls_per_round + 1, 1)
+        idx += 2
+
+        # Vouchers owned (27 binary flags)
+        for vi, vkey in enumerate(ALL_VOUCHERS[:27]):
+            obs[idx + vi] = 1.0 if vkey in gs.vouchers else 0.0
+        idx += 27
+
+        # Boss blind one-hot (15)
+        BOSS_TYPES = [
+            "bl_hook", "bl_goad", "bl_window", "bl_manacle", "bl_eye",
+            "bl_mouth", "bl_fish", "bl_plant", "bl_needle", "bl_head",
+            "bl_tooth", "bl_wall", "bl_psychic", "bl_flint", "bl_water",
+        ]
+        boss_key = gs.current_blind.boss_key if gs.current_blind.is_boss else ""
+        if boss_key in BOSS_TYPES:
+            obs[idx + BOSS_TYPES.index(boss_key)] = 1.0
+        idx += 15
+
+        # Deck composition summary (8): DRAW PILE only (hand already encoded above)
+        # This gives the agent card counting — what's left to draw after discards
+        draw_pile = gs.deck
+        deck_n = max(1, len(draw_pile))
+        suit_counts = [0, 0, 0, 0]
+        face_count = ace_count = number_count = 0
+        for card in draw_pile:
+            si = SUIT_ORDER.index(card.suit) if card.suit in SUIT_ORDER else 0
+            suit_counts[si] += 1
+            if card.rank >= 11 and card.rank <= 13:
+                face_count += 1
+            elif card.rank == 14:
+                ace_count += 1
+            else:
+                number_count += 1
+        for i in range(4):
+            obs[idx + i] = suit_counts[i] / deck_n
+        obs[idx + 4] = face_count / deck_n
+        obs[idx + 5] = ace_count / deck_n
+        obs[idx + 6] = number_count / deck_n
+        obs[idx + 7] = len(draw_pile) / 60.0
+        idx += 8
+
+        # Enhancement / edition / seal counts in draw pile (8)
+        foil = holo = poly = gold_enh = wild = seal_gold = seal_red = seal_blue = 0
+        for card in draw_pile:
+            enh = getattr(card, 'enhancement', 'None')
+            edn = getattr(card, 'edition', 'None')
+            seal = getattr(card, 'seal', 'None')
+            if edn == "Foil": foil += 1
+            elif edn == "Holographic": holo += 1
+            elif edn == "Polychrome": poly += 1
+            if enh == "Gold": gold_enh += 1
+            if enh == "Wild": wild += 1
+            if seal == "Gold": seal_gold += 1
+            elif seal == "Red": seal_red += 1
+            elif seal == "Blue": seal_blue += 1
+        obs[idx:idx+8] = [foil/deck_n, holo/deck_n, poly/deck_n, gold_enh/deck_n,
+                          wild/deck_n, seal_gold/deck_n, seal_red/deck_n, seal_blue/deck_n]
+        idx += 8
+
         assert idx == OBS_DIM, f"obs encoding mismatch: {idx} != {OBS_DIM}"
         return obs
 
     # ── Play combo enumeration ────────────────────────────────────────────────
 
     def _update_play_combos(self):
-        """Pre-compute top-20 card combos for current hand, ranked by hand strength."""
+        """Pre-compute top-20 card combos for current hand, ranked by hand strength.
+        Filters out combos rejected by boss blind restrictions (bl_mouth, bl_eye, bl_psychic).
+        If boss restrictions eliminate ALL combos, includes best unfiltered combo as fallback
+        (game.py will consume the hand on rejection, preventing infinite loops)."""
         hand = self.game.hand
         if not hand:
             self._play_combos = []
@@ -474,10 +595,19 @@ class BalatroSimEnv(gym.Env):
 
         n = len(hand)
         scored: list[tuple] = []
+        fallback: list[tuple] = []  # unfiltered combos for stuck situations
+
+        # Boss blind restrictions
+        gs = self.game
+        boss = gs.current_blind.boss_key if gs.current_blind else ""
+        played_types = gs.played_hand_types_this_round
 
         # Enumerate all k=1..5 card subsets
-        gs = self.game
         for k in range(1, min(6, n+1)):
+            # bl_psychic: must play exactly 5 cards
+            if boss == "bl_psychic" and k != 5:
+                continue
+
             for combo in itertools.combinations(range(n), k):
                 cards = [hand[i] for i in combo]
                 try:
@@ -498,12 +628,26 @@ class BalatroSimEnv(gym.Env):
                         ante=gs.ante,
                         deck_remaining=len(gs.deck),
                     )
-                    scored.append((priority, actual_score, list(combo)))
+                    entry = (priority, actual_score, list(combo))
+                    fallback.append(entry)
+
+                    # Boss blind filtering
+                    if boss == "bl_eye" and hand_type in played_types:
+                        continue
+                    if boss == "bl_mouth" and played_types and hand_type not in played_types:
+                        continue
+
+                    scored.append(entry)
                 except Exception:
                     pass
 
         # Sort descending: best hand first
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        if not scored and fallback:
+            # All combos blocked by boss — include best fallback so the agent
+            # can at least play something (game.py will consume the hand)
+            fallback.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            scored = fallback[:1]
         self._play_combos = [s[2] for s in scored[:20]]
 
 

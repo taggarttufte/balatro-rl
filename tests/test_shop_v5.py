@@ -48,25 +48,48 @@ def _advance_to_shop(env: BalatroSimEnvV5):
     """Play random valid actions until the shop phase is reached.
     Returns (obs, info) at start of shop phase.
     """
-    obs, info = env.reset()
-    for _ in range(500):
-        agent = info["agent"]
-        if agent == "shop" and info["shop_substate"] == SUBSTATE_NORMAL:
-            return obs, info
-        if agent == "play":
-            mask = env.get_play_action_mask()
-        elif info["shop_substate"] == SUBSTATE_PACK_OPEN:
-            mask = env.get_pack_open_mask()
-        elif info["shop_substate"] == SUBSTATE_PACK_TARGET:
-            mask = env.get_pack_target_mask()
-        else:
-            mask = env.get_shop_action_mask()
-        valid = np.where(mask)[0]
-        action = int(np.random.choice(valid)) if len(valid) else 1
-        obs, _, terminated, _, info = env.step(action)
-        if terminated:
-            obs, info = env.reset()
-    pytest.fail("Could not reach shop phase within 500 steps")
+    # Try multiple seeds to reliably reach shop
+    for seed in [42, 123, 7, 999, 0]:
+        env_try = BalatroSimEnvV5(seed=seed)
+        obs, info = env_try.reset()
+        for _ in range(2000):
+            agent = info["agent"]
+            if agent == "shop" and info["shop_substate"] == SUBSTATE_NORMAL:
+                # Copy state to the original env so callers can use it
+                env.game = env_try.game
+                env._shop_substate = env_try._shop_substate
+                env._comm_vec = env_try._comm_vec
+                env._prev_quality = env_try._prev_quality
+                env._play_combos = env_try._play_combos
+                env._pack_choices = env_try._pack_choices
+                env._pack_picks_left = env_try._pack_picks_left
+                env._pending_tarot = env_try._pending_tarot
+                env._steps = env_try._steps
+                env._episode_reward = env_try._episode_reward
+                return obs, info
+            if agent == "play":
+                mask = env_try.get_play_action_mask()
+                # Prefer skip blind (31) to reach shop quickly, else play best combo (0)
+                if mask[31]:
+                    action = 31
+                elif mask[0]:
+                    action = 0
+                else:
+                    valid = np.where(mask)[0]
+                    action = int(valid[0]) if len(valid) else 30
+            elif info["shop_substate"] == SUBSTATE_PACK_OPEN:
+                mask = env_try.get_pack_open_mask()
+                action = len(mask) - 1  # skip pack
+            elif info["shop_substate"] == SUBSTATE_PACK_TARGET:
+                mask = env_try.get_pack_target_mask()
+                action = 52  # skip targeting
+            else:
+                mask = env_try.get_shop_action_mask()
+                action = 1  # leave shop
+            obs, _, terminated, _, info = env_try.step(action)
+            if terminated:
+                obs, info = env_try.reset()
+    pytest.fail("Could not reach shop phase with any seed")
 
 
 def _game_in_shop(seed=42) -> BalatroGame:
@@ -561,7 +584,7 @@ class TestCommVector:
         vec = np.random.rand(COMM_DIM).astype(np.float32)
         env.set_comm_vec(vec)
         obs = env.get_play_obs()
-        np.testing.assert_array_almost_equal(obs[342:374], vec)
+        np.testing.assert_array_almost_equal(obs[-COMM_DIM:], vec)
 
     def test_comm_vec_reset_to_zeros(self, env):
         """After reset, the comm vector should be all zeros."""

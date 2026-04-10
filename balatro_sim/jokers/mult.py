@@ -145,12 +145,12 @@ class _Bootstraps:
         ctx.mult += 2 * (ctx.dollars // 5)
 JOKER_REGISTRY["j_bootstraps"] = _Bootstraps()
 
-# ── j_photograph: first face card scored each round gives +5 Mult ────────────
+# ── j_photograph: x2 Mult for first face card scored each round ──────────────
 class _Photograph:
     def on_score_card(self, inst, card, ctx):
         if card.is_face_card and not card.debuffed and not inst.state.get("fired"):
             inst.state["fired"] = True
-            ctx.mult += 5
+            ctx.mult_mult *= 2
     def on_round_end(self, inst, ctx):
         inst.state["fired"] = False
 JOKER_REGISTRY["j_photograph"] = _Photograph()

@@ -2,286 +2,240 @@
 
 A reinforcement learning agent that learns to play [Balatro](https://www.playbalatro.com/) using PPO.
 
-The project went through five major versions: from a simple Lua mod with file-based IPC, through socket-based parallelism, to a complete Python simulation — and now a **dual-agent architecture** where separate shop and play agents cooperate to learn Balatro end-to-end.
+Six versions over four months: from a Lua mod with file-based IPC, through socket parallelism and a failed dual-agent experiment, to a complete Python simulation with a single-agent PPO reaching **2% win rate** across millions of unique seeds. V7 (strategic card selection) is next.
 
-> **Disclaimer:** Balatro is a product of LocalThunk/Playstack. This is an unofficial mod for research and educational purposes only.
+> **Disclaimer:** Balatro is a product of LocalThunk/Playstack. This is an unofficial project for research and educational purposes only.
 
 ---
 
 ## What is Balatro?
 
-Balatro is a roguelike poker deckbuilder. You play 5-card hands to score chips against escalating point thresholds ("blinds"), buying joker modifiers between rounds to multiply your scoring.
+Balatro is a roguelike poker deckbuilder. You play poker hands to score chips against escalating point thresholds ("blinds"), buying joker modifiers between rounds to multiply your scoring. Clear 8 antes (24 blinds) to win.
 
 **Why it's a hard RL problem:**
 
 | Challenge | Description |
 |-----------|-------------|
-| Combinatorial action space | 8 cards → 218 possible play/discard combinations per turn |
+| Combinatorial action space | 8 cards in hand -> 218 possible play/discard subsets per turn |
 | Long-horizon credit assignment | A joker bought in ante 1 might only pay off in ante 6 |
-| Partial observability | Upcoming blinds, deck order, future shop contents all unknown |
+| Partial observability | Deck order, future shop contents, upcoming blinds all unknown |
 | Sparse rewards | Only hands that clear blinds produce meaningful reward |
-| Stochastic elements | Card draws, joker spawns, boss blind effects are randomized |
+| Stochastic elements | Card draws, joker spawns, boss blind effects randomized each game |
 | Compounding strategy | Hand upgrades, deck thinning, joker combos interact multiplicatively |
 
 A skilled human wins ~70% of runs. Random play wins <0.01%.
 
 ---
 
-## Current Version: V5 — Dual-Agent Architecture
+## Version History
 
-### Why dual agents
+| Version | Method | Architecture | Peak Win Rate | Key Learning |
+|---------|--------|-------------|:---:|-------------|
+| V1 | File IPC, SB3 | 1 Balatro instance | <0.01% | Proof of concept |
+| V2 | File IPC, Ray | 8 Balatro instances | <0.01% | Parallelism works but IPC is the bottleneck |
+| V3 | Socket IPC, custom PPO | 8 Balatro instances | <0.01% | RAM degradation kills live-game training |
+| V4 | Python sim, single agent | 16 workers | 0.47% | Sim works, combo ranking helps enormously |
+| V5 | Python sim, dual agent | 16 workers | 0% | Shop starvation is structural -- failed after 12 runs |
+| **V6** | **Python sim, single agent** | **16 workers** | **2.0%** | **Sim audit + heuristic rewards, combo ranker is the ceiling** |
+| V7 | TBD | TBD | Target: 30% | Strategic card selection + long-horizon planning |
 
-V4 proved the Python sim works: 4,000 steps/sec, correct scoring, 0.47% win rate with
-a single policy. But a single agent treating play and shop as one flat action space
-can't effectively learn economy — shop steps are ~5% of total transitions, so the agent
-converges to "leave shop immediately" before getting enough signal to connect purchases
-to downstream wins.
+### Throughput Progression
 
-**The core insight:** play decisions (which cards to use) and shop decisions (which jokers
-to buy) require fundamentally different reasoning. Splitting into two cooperating agents
-lets each specialize, with a learned communication channel between them.
+| Version | Method | Steps/sec | vs V1 |
+|---------|--------|:---------:|:-----:|
+| V1 | File IPC, SB3, 1 env | ~0.08 | 1x |
+| V2 | File IPC, Ray, 8 envs | ~6 | 75x |
+| V3 | Socket IPC, 8 envs | ~14* | 175x |
+| V4-V6 | Python sim, 16 workers | ~4,000 | 50,000x |
 
-### V5 Architecture
+*V3 degraded from ~39 sps to ~14 sps over training due to Lua GC / RAM issues.
+
+---
+
+## Current Version: V6 -- Single Agent with Enhanced Shop Awareness
+
+V5's dual-agent architecture (separate play + shop networks with a 32-dim communication vector) failed after 12 training runs due to **shop starvation**: the shop agent received <0.1% of training steps and could never learn. V6 returns to V4's single-agent approach with all lessons applied.
+
+### What Changed from V4
+
+1. **Critical combo scoring bug fix** -- V5's `score_hand()` was called with wrong arguments, causing all combos to score 0. This single bug caused 10 failed V5 runs. V6 uses V4's correct implementation.
+
+2. **+60 observation features** (342 -> 402 dims) -- Reroll cost, voucher ownership flags, boss blind one-hot, draw pile composition (suit ratios, face/ace/number counts), enhancement/edition/seal counts.
+
+3. **Heuristic shop rewards** -- +0.3 for buying jokers, +0.2 for using planets, -0.2 for leaving with buyable jokers and empty slots, -0.02/dollar wasted above interest cap, -0.5 for selling jokers with open slots and no upgrade target.
+
+4. **Random seeds per episode** -- V4 used 16 fixed seeds and the agent memorized them (19k wins on only 117 unique seeds). V6 randomizes every episode.
+
+5. **Full simulation audit** -- 32 joker fixes (~30% of implementations were wrong), 3 non-joker fixes. Burglar was implemented as a scaling mult joker instead of a hand modifier, which made the agent's entire winning strategy (Burglar + Green Joker + Space Joker) a training artifact.
+
+6. **Boss blind loop fixes** -- bl_mouth and bl_eye could cause infinite loops when all combos were blocked. Combo ranker now filters restricted combos with a fallback.
+
+7. **Episode truncation** -- 2000-step max prevents degenerate no-op loops.
+
+### Architecture
 
 ```
-SHOP PHASE                           BLIND PHASE
-+------------------+                +------------------+
-|   Shop Agent     |                |   Play Agent     |
-|   6-layer resnet |                |   6-layer resnet |
-|   ~2.3M params   |                |   ~2.3M params   |
-+--------+---------+                +--------+---------+
-         |                                   |
-         |  32-dim communication vector      |
-         +---------> concat to obs ----------+
-                     (stop-gradient)
+Input (402 dims) -> Embed (512, ReLU) -> 4x ResidualBlock(512) -> Actor (46) / Critic (1)
+
+ResidualBlock: x + ReLU(FC(ReLU(FC(x)))) with LayerNorm
+Total params: ~2.34M
 ```
 
-- **Play agent:** 374-dim obs (342 game features + 32 comm vector), Discrete(46) actions
-- **Shop agent:** 188-dim obs (shop-specific features), Discrete(17) actions with hierarchical
-  pack sub-states (PACK_OPEN, PACK_TARGET)
-- **Communication:** Shop agent produces a 32-dim vector at end of each shop phase, carried
-  as fixed context through all hands of the next blind. Stop-gradient prevents co-adaptation.
+### Observation Space (402 features)
 
-### Simulation
+| Range | Dims | Description |
+|-------|:----:|-------------|
+| `[0:14]` | 14 | Game scalars: ante, blind, boss flag, score progress, target, hands/discards left, dollars, joker count, phase one-hot |
+| `[14:222]` | 208 | Hand cards: 8 slots x 26 features (rank, suit, enhancement, edition, seal, debuff, present) |
+| `[222:272]` | 50 | Joker slots: 5 x 10 features (present, type ID, rarity, edition, mult/chips/sell/destroyed/mult_mult/price) |
+| `[272:314]` | 42 | Shop items: 7 x 6 features (available, kind, price, affordable, has joker slot, has consumable slot) |
+| `[314:326]` | 12 | Planet levels: 12 hand types |
+| `[326:342]` | 16 | Consumables: 2 x 8 features (present, type flags, planet target, afford context, hands left, phase) |
+| `[342:344]` | 2 | Reroll info: cost, free rerolls remaining |
+| `[344:371]` | 27 | Voucher ownership flags |
+| `[371:386]` | 15 | Boss blind one-hot (15 boss types) |
+| `[386:394]` | 8 | Draw pile composition: 4 suit ratios + face/ace/number fractions + pile size |
+| `[394:402]` | 8 | Draw pile modifiers: foil/holo/poly/gold/wild/seal counts |
+
+### Action Space -- Discrete(46)
+
+```
+BLIND_SELECT:    30 = play blind, 31 = skip blind (non-boss only)
+SELECTING_HAND:  0-19 = play combo i (ranked by score_hand() descending)
+                 20-27 = discard card i (single card)
+                 28-29 = use consumable 0/1
+SHOP:            32-38 = buy shop item 0-6
+                 39-43 = sell joker 0-4
+                 44 = reroll, 45 = leave shop
+```
+
+### Reward Structure
+
+| Signal | Value | Notes |
+|--------|-------|-------|
+| Blind cleared | +2.0 x (9 - ante) | Inverse-ante: ante 1 = +16, ante 8 = +2 |
+| Ante completed | +5.0 | Boss blind beaten |
+| Game won | +50.0 | Cleared ante 8 boss |
+| Game lost | -2.0 | |
+| Score progress | 0.05 x log1p(delta) x 100 | Dense, log-scaled to prevent reward explosion |
+| Buy joker | +0.3 | Into an empty slot |
+| Use planet | +0.2 | Free hand level upgrade |
+| Leave with buyable jokers | -0.2 | Empty slots + affordable jokers in shop |
+| Excess money | -0.02/dollar | Above nearest $5 interest boundary (cap $25) |
+| Sell blunder | -0.5 | Selling with open slots and no expensive upgrade |
+
+### Training Configuration
+
+```
+PPO: LR=3e-4, gamma=0.99, lambda=0.95, clip=0.2
+     entropy=0.01, VF=0.5, grad_clip=0.5
+     epochs=10, minibatch=128
+
+Workers: 16 (multiprocessing, CPU inference)
+Batch: 32,768 steps/iter (2048/worker)
+Truncation: 2000 steps/episode
+Seeds: randomized per episode
+Device: CUDA (RTX 3080 Ti for PPO updates)
+```
+
+---
+
+## V6 Training Runs
+
+### Run 1 -- Fixed Seeds (baseline)
+
+**Config:** 16 workers, 4096 steps/iter, fixed seeds | **Result:** Ante 9, 19k wins
+
+The agent discovered Green Joker + Burglar + Space Joker synergy (33%/31%/26% of wins), playing Pairs (48%) and Two Pairs (21%). Reached ante 9 by iteration ~3. But only 117 unique seeds across all wins -- heavy memorization.
+
+### Run 2 -- Random Seeds
+
+**Config:** 16 workers, 32k steps/iter, random seeds | **Result:** Ante 9 by iter 4, reward +98 by iter 15
+
+First run with true generalization. Entropy stayed healthy at 2.5-2.7. Killed to apply boss blind loop fixes.
+
+### Run 3 -- Boss Blind Loop Fix
+
+Fixed bl_mouth/bl_eye infinite loops (4% of seeds previously stuck). Combo ranker now filters boss-restricted combos.
+
+**Result:** 2.5% win rate, 70% die on ante 1 boss. Agent averaged $5 at game end. Only 1.5 jokers in winning runs. Killed for reward tuning.
+
+### Run 4 -- Excess Money + Sell Blunder Penalties
+
+Added -0.02/dollar waste and -0.5 sell blunder. Killed at iter 117 when the Burglar bug was discovered.
+
+### Run 5 -- Burglar Bug Fix
+
+**Discovery:** Burglar was implemented as a scaling mult joker (+3 mult/hand played, accumulating permanently) instead of a hand modifier (+3 hands, -3 discards per blind). Combined with Green Joker and Space Joker, this produced 612 million chip Pairs by ante 8. The agent's entire winning strategy was built on a broken joker.
+
+**Impact:** Hard reset of learning. All previous win rates were inflated.
+
+### Run 6 -- Full Sim Audit + Card Counting (final V6 run)
+
+**32 joker fixes** across 6 modules (~30% of implementations wrong): 7 completely wrong effects, 8 additive->multiplicative corrections, 13 other fixes, 4 stubs implemented. Also fixed Lucky enhancement probability (1/5 -> 1/4), Stone card scoring, and passive joker accumulation bugs.
+
+**Result:** 1.9-2.0% win rate, converged by iter ~100. Green Joker (51%) + Space Joker (45%) still dominant. Killed at iter 287.
+
+**Conclusion:** The combo ranker IS the policy ceiling. The agent converges to "always play action 0" (best combo) within 50 iterations. It cannot learn strategic discarding because card selection is automated. 80% of games die at ante 1 boss blind (600 chips, 4 hands, no jokers) -- a human survives this 95%+ of the time by discarding intelligently.
+
+---
+
+## Why 2% Is the Ceiling
+
+| Problem | Why It Matters |
+|---------|---------------|
+| No strategic discards | Agent can't turn a bad hand into a good one. At mercy of initial draw. |
+| Greedy combo ranking | Always plays the highest-scoring combo, even when "just enough" would save resources. |
+| No multi-round planning | Plays each hand in isolation. Can't plan across 4 hands per blind. |
+| No conditional strategy | Same policy regardless of joker loadout. Doesn't adapt play style to synergies. |
+
+80% of games die at ante 1. The agent needs to discard to survive, and it can't.
+
+---
+
+## Simulation
 
 The Python sim (`balatro_sim/`) reimplements Balatro's full ruleset:
 
 | Module | Contents |
 |--------|----------|
-| `game.py` | Full game loop — BLIND_SELECT, SELECTING_HAND, SHOP, ROUND_EVAL states; 15 boss blind effects; ante progression; win condition |
-| `scoring.py` | Chip/mult computation, card enhancements, editions, seals, retriggers |
-| `hand_eval.py` | All 12 hand types including Flush Five / Flush House |
-| `jokers/` | **164 jokers** implemented across 6 modules |
-| `consumables.py` | 12 planets, 22 tarots, 18 spectrals, 27 vouchers |
-| `shop.py` | Weighted rarity rolls, buy/sell/reroll, full 150+ item catalogue |
-| `env_v5.py` | V5 dual-agent env — routes phases to agents, hierarchical shop actions |
-| `quality.py` | Loadout quality estimator (rarity + synergies + planet levels) |
+| `game.py` (661 lines) | Full game loop -- 5 states, 15 boss blind effects, ante progression, win/loss |
+| `scoring.py` (142 lines) | Chip/mult computation, enhancements, editions, seals, retriggers |
+| `hand_eval.py` (172 lines) | All 12 hand types including Flush Five / Flush House |
+| `jokers/` (6 modules) | **164 jokers**, fully audited (504 tests passing) |
+| `consumables.py` (549 lines) | 12 planets, 22 tarots, 18 spectrals, 27 vouchers |
+| `shop.py` (361 lines) | Weighted rarity rolls, buy/sell/reroll, 150+ item catalogue |
+| `card.py` (75 lines) | Card representation with enhancement/edition/seal |
+| `constants.py` (109 lines) | Game constants, starting values |
+| `quality.py` (94 lines) | Loadout quality estimator (V5, kept for reference) |
 
-### Observation Spaces
-
-**Play agent (374 features):**
-
-| Range | Description |
-|-------|-------------|
-| `[0:40]` | Hand cards — 8 slots × 5 features (rank, suit, enhancement, edition, seal) |
-| `[40:100]` | Play combos — 20 slots × 3 features (hand_type_id, score_estimate, num_cards) |
-| `[100:108]` | Discard options — 8 slots |
-| `[108:174]` | Jokers — 5 slots × (type_id + state features) |
-| `[174:198]` | Consumables, vouchers |
-| `[198:210]` | Scalar state — ante, blind_idx, score_progress, hands_left, discards_left, dollars, etc. |
-| `[210:342]` | Deck composition, hand type levels |
-| `[342:374]` | Communication vector from shop agent |
-
-**Shop agent (188 features):**
-
-| Range | Description |
-|-------|-------------|
-| `[0:10]` | Game scalars — ante, round, dollars, interest, hands_left, reroll_cost, joker slots |
-| `[10:60]` | Joker loadout — 5 slots × 10 features |
-| `[60:90]` | Shop items — 6 slots × 5 features |
-| `[90:100]` | Booster packs — 2 slots × 5 features |
-| `[100:112]` | Planet/hand levels — 12 hand types |
-| `[112:120]` | Consumable slots |
-| `[120:154]` | Boss blind one-hot, voucher flags, deck composition |
-| `[154:188]` | Card enhancement/seal counts, deck size |
-
-### Action Spaces
-
-**Play agent — `Discrete(46)` (same as V4):**
-```
-[0-19]   play combo (sorted by score_hand() descending — best hand always action 0)
-[20-27]  discard card at position i
-[28-29]  use consumable
-[30]     play blind
-[31]     skip blind (non-boss only)
-[32-38]  buy shop item
-[39-43]  sell joker
-[44]     reroll shop
-[45]     leave shop
-```
-
-**Shop agent — hierarchical:**
-```
-Normal shop:  Discrete(17)
-  0      reroll
-  1      leave shop
-  2-7    buy shop item 0-5
-  8-9    buy booster pack 0-1
-  10-14  sell joker 0-4
-  15-16  use consumable 0-1
-
-Pack open:    Discrete(N+1)  — pick from revealed cards or skip
-Pack target:  Discrete(53)   — apply tarot to deck card or skip
-```
-
-### Reward Structure
-
-| Signal | Value |
-|--------|-------|
-| Blind cleared | +2.0 × (9 - ante) (inverse-ante: early progress worth more) |
-| Ante completed | +5.0 |
-| Game won (past ante 8) | +50.0 |
-| Game lost | -2.0 |
-| Score progress (log-scaled) | `0.05 × log(1 + delta) × 100` |
-| Leave shop penalty | -0.1 (prevents instant-leave collapse) |
-| Loadout quality delta | +0.5 × quality improvement (auxiliary shop reward) |
-| Spending reward | +0.05 × dollars spent (encourages purchasing) |
-
-### Network Architecture
-
-Both agents use 6-layer residual networks:
-```
-input → embed (512) → 4 × ResidualBlock(512) → actor head / critic head
-
-ResidualBlock: x + ReLU(fc2(ReLU(fc1(x)))), with LayerNorm
-```
-
-Shop agent adds a 32-dim linear communication head on the shared trunk.
-
-### Asymmetric Data Collection
-
-Shop steps are naturally rare (~5% of transitions). V5 uses asymmetric collection:
-workers keep running until both conditions are met:
-1. At least `steps_target` total steps collected
-2. At least `min_shop_steps` shop steps collected
-
-Force-resets episodes after 200 play steps without a shop visit to prevent shop drought.
-Hard cap at 16× target prevents runaway collection.
-
----
-
-## V4 — Python Simulation
-
-V4 replaced live Balatro instances with a pure Python simulation:
-- **~4,000 steps/sec** using 16 multiprocessing workers (vs ~14 sps in V3)
-- Zero RAM degradation (no Lua runtime)
-- Single-agent PPO with flat Discrete(46) action space
-
-See [V4 design notes](results/V4_DESIGN_NOTES.md) for full details.
-
----
-
-## Training Runs
-
-### V4 Runs (single agent, `train_sim.py`)
-
-| Run | Batch | Network | Params | Iters | Notes |
-|-----|-------|---------|--------|-------|-------|
-| Run 1 | 4,096 | 3-layer MLP | 345k | 1,000 | Reward unbounded (linear delta) — spikes to 82M |
-| Run 2 | 4,096 | 3-layer MLP | 345k | ~180 | Killed — same reward issue |
-| Run 3 | 4,096 | 3-layer MLP | 345k | 1,000 | Log1p reward fix; score-sorted combos |
-| Run 4 | 32,768 | 3-layer MLP | 345k | 1,000 | Large batch comparison vs run 3 |
-| Run 5 | 8,192 | 6-layer residual | 2.3M | 1,000 | Deeper architecture |
-| Run 6 | 8,192 | 6-layer residual | 2.3M | 2,000 | Inverse-ante rewards, best V4 result |
-
-**Best V4 result (run 3):** 0.47% win rate, ante 9 by iter 3, reward 1.7 → 48.
-
-### V5 Runs (dual agent, `train_v5.py`)
-
-| Run | Config | Play Init | Shop Init | Iters | Result |
-|-----|--------|-----------|-----------|-------|--------|
-| Run 1 | Phase A (frozen play) | Run 6 | Scratch | 500 | Shop starved — 0 shop steps by iter 31 |
-| Run 2 | Phase B (joint) | Run 6 | Scratch | — | NaN crash — embed shape mismatch |
-| Run 3 | Phase B | Run 6 | Scratch | ~1484 | NaN crash — advantage normalization |
-| Run 4 | Phase B | Run 6 | Scratch | 1,000 | Play entropy collapsed to 0.002 |
-| Run 5 | Phase B | Run 6 | Scratch | ~1106 | NaN crash with 4000-step truncation |
-| Run 6 | Phase B | Run 6 | Scratch | 1,000 | Play entropy collapse despite 0.05 coeff |
-| Run 7 | Phase B | Run 6 | Scratch | ~1342 | First healthy run, reward -1.5 → +0.35 |
-| Run 8 | Phase B | Scratch | Scratch | 841 | Both from scratch — shop steps healthy early, starved later |
-| Run 9 | Phase B | Scratch | Scratch | ongoing | Leave penalty + spend reward, shop exploring |
-
-**Key findings:**
-- **Pretrained play agent = worse shop starvation.** Better play → longer episodes → fewer
-  shop resets per batch. Both-from-scratch gives better early shop exposure.
-- **Shop starvation is structural.** Play/shop step ratio is ~20:1. Solved with asymmetric
-  collection (min shop steps per iteration) and force-resets during play droughts.
-- **Leave bias is real.** Leaving shop is always safe (zero cost). Without a leave penalty
-  (-0.1) and spending reward, shop agent converges to "leave immediately" in ~40 iters.
-- **Credit assignment is the core challenge.** A joker bought at step 50 may not pay off
-  until step 400+. Quality estimator provides intermediate reward signal.
+Test suite: **504 tests passing** across joker behavior, scoring, boss blinds, game transitions, consumables, and environment integration.
 
 ---
 
 ## What We Learned
 
-### V5 Lessons (Dual-Agent Training)
+### Architecture
 
-**Pretrained agents cause data starvation for the minority phase.** When the play agent
-starts competent (from V4 run 6), it survives longer → fewer episode resets → fewer shop
-transitions per batch. Runs 1-6 all hit this: shop steps collapsed to near zero. Starting
-both agents from scratch (run 8+) gives much better early shop exposure.
+**Don't split what doesn't need splitting.** V5's dual-agent created more problems (starvation, credit assignment, entropy) than the single-agent "shop is 5% of steps" issue it was designed to solve. A single agent with heuristic shop rewards outperformed 12 dual-agent runs in 4 iterations.
 
-**Shop starvation is structural, not a hyperparameter problem.** The game's natural play/shop
-ratio is ~20:1. No amount of tuning batch size or truncation fixes this. The solution is
-asymmetric collection: guarantee a minimum number of shop steps per iteration, and force-reset
-episodes during long play-only streaks.
+**Pre-ranking actions matters enormously.** Sorting combos by actual `score_hand()` output (accounting for jokers, planet levels, enhancements) caused ante 9 by iteration 2 instead of iteration 460.
 
-**Leave bias requires explicit counter-incentives.** Leaving the shop is always safe (zero
-immediate cost). Without intervention, the shop agent learns "leave immediately" within
-40 iterations. A leave penalty (-0.1), quality-delta reward, and spending reward together
-keep the shop agent exploring.
+**Entropy floors fight the gradient when the optimal policy is genuinely low-entropy.** With correct combo ranking, action 0 is overwhelmingly dominant. Forcing exploration degraded performance.
 
-**NaN hardening is non-negotiable for dual-agent PPO.** With two agents and imbalanced data,
-edge cases compound: all-False mask rows, empty rollout normalization, extreme advantages
-from sparse shop rewards. Every path through the PPO update needs nan_to_num guards.
+### Simulation Fidelity
 
-### V4 Lessons (Python Sim Training)
+**Fix the fundamentals first.** The V5 combo scoring bug caused 10 failed training runs before being discovered. One broken line of code masked every other improvement.
 
-**Pre-ranking actions matters enormously.** Switching to actual `score_hand()` ordering
-(accounting for jokers, planet levels, enhancements) caused ante 9 by **iteration 2**
-instead of iteration 460.
+**Audit everything.** ~30% of jokers were implemented incorrectly. The agent's best strategy (Burglar + Green + Space) was entirely built on a broken joker producing 612M chip Pairs.
 
-**Unbounded rewards destabilize PPO.** Linear score progress hit 82M reward in a single
-episode. Log scaling fixed it immediately.
+### Training
 
-**Winning joker builds are learnable.** The agent discovered the Green Joker + Burglar +
-Space Joker synergy (~28% of wins) without being told it exists.
+**Seed diversity prevents memorization.** 16 fixed seeds -> 117 unique winning seeds. Random seeds per episode -> true generalization.
 
-### V3 Lessons (Live Game Training)
+**Heuristic reward shaping bootstraps learning.** Dense rewards for smart shop actions give signal from step 1. The agent can surpass the heuristic as it trains.
 
-**RAM degradation is fatal for long runs.** 8 Balatro instances ballooned to 23GB after 4-6
-hours. The Lua GC couldn't keep up at 128x speed. Python sim eliminated this entirely.
-
-**Socket IPC > file IPC.** 3.31x throughput improvement and much richer episodes (20 → 90
-steps) from fewer dropped actions.
-
----
-
-## Throughput Comparison
-
-| Version | Method | Parallelism | Steps/sec | vs V1 |
-|---------|--------|-------------|-----------|-------|
-| V1 | File IPC, SB3 | 1 env | ~0.08 | 1× |
-| V2 single | File IPC, SB3 | 1 env | ~6 | 75× |
-| V2 parallel | File IPC, Ray | 8 envs | ~6 | 75× |
-| V3 | Socket IPC, custom PPO | 8 envs | ~14* | 175× |
-| **V4** | **Python sim, multiprocessing** | **16 workers** | **~4,000** | **50,000×** |
-
-*V3 degraded from ~39 sps to ~14 sps median over training due to RAM issues.
-
-**V4 bottleneck:** Pure Python game simulation. CPU (Ryzen 9 7950X, 16 cores) is fully
-utilized at 16 workers. A C extension or JAX-based sim would yield 50-200× further
-improvement.
+**Inverse-ante rewards help early survival.** Weighting ante 1 blind clears at 8x ante 8 clears focuses learning where 80% of deaths occur.
 
 ---
 
@@ -289,39 +243,42 @@ improvement.
 
 ```
 balatro-rl/
-├── train_v5.py               # V5 training — dual-agent PPO (current)
-├── train_sim.py              # V4 training — single-agent PPO
+├── train_sim.py              # V6 training -- single-agent PPO (current)
+├── train_v5.py               # V5 training -- dual-agent PPO (deprecated)
 ├── balatro_sim/              # Python Balatro simulation
-│   ├── game.py               # Full game loop (BalatroGame class)
-│   ├── env_v5.py             # V5 dual-agent env (play + shop routing)
-│   ├── env_sim.py            # V4 single-agent env
-│   ├── quality.py            # Loadout quality estimator
+│   ├── game.py               # Full game loop (BalatroGame)
+│   ├── env_sim.py            # V6 environment (402 obs, 46 actions)
+│   ├── env_v5.py             # V5 dual-agent env (deprecated)
 │   ├── scoring.py            # Chip/mult scoring engine
-│   ├── hand_eval.py          # Hand type evaluation
+│   ├── hand_eval.py          # Hand type evaluation (12 types)
 │   ├── consumables.py        # Planets, tarots, spectrals, vouchers
-│   ├── shop.py               # Shop system
+│   ├── shop.py               # Shop system, rarity rolls
 │   ├── card.py               # Card representation
 │   ├── constants.py          # Game constants
+│   ├── quality.py            # Loadout quality estimator
 │   └── jokers/               # 164 jokers across 6 modules
-│       ├── mult.py, chips.py, scaling.py
+│       ├── base.py, chips.py, mult.py, scaling.py
 │       ├── hand_type.py, economy.py, misc.py
-│       └── tests/            # 120 tests, all passing
-├── tests/                    # V5 environment tests
-│   └── test_shop_v5.py       # Shop action masking, buying/selling, packs, comm vector
+│       └── tests/            # Joker unit tests
+├── tests/                    # Integration tests (504 total passing)
 ├── scripts/                  # Plotting and analysis
-│   ├── plot_runs.py          # Multi-run comparison charts
-│   ├── plot_v5_run8.py       # V5 run 8 training dashboard
-│   ├── plot_v4.py            # V4 training dashboard
-│   └── plot_training.py      # V2/V3/V4 comparison
-├── results/                  # Design notes and historical results
-│   ├── V5_DESIGN_NOTES.md    # Dual-agent architecture spec
-│   ├── V5_RUN_LOG.md         # V5 training run journal
-│   ├── V4_DESIGN_NOTES.md, V3_DESIGN_NOTES.md
-│   └── V1_RESULTS.md, V2_*.md, NOTES.md
-├── legacy/
-│   ├── training/             # V1-V3 training scripts
-│   └── tests/                # V1-V3 test and analysis scripts
-└── launch/                   # PowerShell scripts for V3 instance management
+│   ├── training_report.py    # Training dashboard
+│   ├── plot_runs.py          # Multi-run comparison
+│   └── plot_v5_run8.py, plot_v4.py, plot_training.py
+├── results/                  # Design notes and run logs
+│   ├── V7_PLANNING.md        # V7 architecture design (strategic card selection)
+│   ├── V6_DESIGN_NOTES.md    # V6 design and changes from V4
+│   ├── V6_RUN_LOG.md         # V6 training run journal (6 runs)
+│   ├── V5_DESIGN_NOTES.md    # V5 dual-agent spec (for reference)
+│   ├── V5_RUN_LOG.md         # V5 training runs (12 runs, all failed)
+│   └── V4_DESIGN_NOTES.md, V3_DESIGN_NOTES.md, V1/V2 results
+├── checkpoints_sim/          # V6 model weights + episode logs
+├── checkpoints_v5/           # V5 model weights (deprecated)
+├── logs_sim/                 # Training logs, highlight episodes
+├── legacy/                   # V1-V3 training scripts and tests
+├── launch/                   # PowerShell scripts (V3 instance management)
+├── mod/, mod_v2/             # Lua mod files (V1-V3)
+└── versions/                 # Archived Lua versions
 ```
 
 ---
@@ -336,26 +293,39 @@ pip install torch numpy gymnasium
 ```
 
 ```bash
-# Run tests
-python -m pytest balatro_sim/tests/ tests/ -v
+# Run tests (504 passing)
+python -m pytest balatro_sim/jokers/tests/ tests/ -v
 
-# Train V5 (dual-agent, default: 16 workers, 8k batch, 1000 iters)
-python train_v5.py --training-phase B --workers 16 --steps 8192 --iterations 1000
+# Train V6 (single agent, default: 16 workers, 32k batch, 1000 iters)
+python train_sim.py --workers 16 --steps-per-worker 2048 --iterations 1000
 
-# With asymmetric shop collection (guarantee 200 shop steps/iter)
-python train_v5.py --training-phase B --min-shop-steps 200
+# Smaller batch for testing
+python train_sim.py --workers 4 --steps-per-worker 256 --iterations 100
 
-# Resume from checkpoints
-python train_v5.py --resume-play checkpoints_v5/iter_0500_play.pt \
-                   --resume-shop checkpoints_v5/iter_0500_shop.pt
+# Resume from checkpoint
+python train_sim.py --resume checkpoints_sim/iter_0100.pt
 
-# Train V4 (single-agent, for comparison)
-python train_sim.py --workers 16 --steps-per-worker 512 --iterations 1000
+# Benchmark sim throughput
+python -m balatro_sim.env_sim
 ```
+
+---
+
+## Next: V7 -- Strategic Card Selection
+
+The 2% ceiling exists because the combo ranker automates card selection. The agent picks from pre-ranked combos and converges to "always play action 0." It can't discard strategically, can't play "just enough," and can't adapt to joker synergies.
+
+**Planned approach: Hierarchical Intent + Card Selection (Approach E)**
+
+1. **Strategic intent** (discrete action): "play for score", "discard to improve hand", "play just enough to clear blind", "discard to thin deck"
+2. **Card selection** (learned scoring head): given the intent, score each card and select the optimal subset
+
+This separates strategy (when to be greedy vs conservative) from tactics (which cards to play). See [V7 Planning](results/V7_PLANNING.md) for full analysis of 5 approaches considered.
+
+**Target: 30% win rate.**
 
 ---
 
 ## Acknowledgments
 
-Built on [Steamodded](https://github.com/Steamopollys/Steamodded) for Lua mod loading
-and [Handy](https://github.com/nicholassam6425/balatro-mods) for speed control (V3).
+Built on [Steamodded](https://github.com/Steamopollys/Steamodded) for Lua mod loading and [Handy](https://github.com/nicholassam6425/balatro-mods) for speed control (V1-V3).

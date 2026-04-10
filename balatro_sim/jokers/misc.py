@@ -212,24 +212,22 @@ class _Satellite:
         inst.state["planets_used"].add(planet_name)
 JOKER_REGISTRY["j_satellite"] = _Satellite()
 
-# ── j_cloud_9: +$1 per 9 in full deck at end of round ────────────────────────
+# ── j_cloud_9: +$1 per 9 in FULL DECK at end of round ────────────────────────
+# game.py passes ctx=None for on_round_end, so we track 9s via game state
+# The count is set by game.py before calling on_round_end (via joker state)
 class _Cloud9:
     def on_round_end(self, inst, ctx):
-        # Cloud 9 fires at end of round via game.py; track 9s in state
-        nines = inst.state.get("nines_seen", 0)
+        nines = inst.state.get("deck_nines", 0)
         inst.state["pending_money"] = inst.state.get("pending_money", 0) + nines
-        inst.state["nines_seen"] = 0  # reset each round
-    def on_score_card(self, inst, card, ctx):
-        if card.rank == 9 and not card.debuffed:
-            inst.state["nines_seen"] = inst.state.get("nines_seen", 0) + 1
 JOKER_REGISTRY["j_cloud_9"] = _Cloud9()
 
-# ── j_wee (wee joker): +8 chips per 2 scored — already j_wee_joker ──────────
-# j_wee is the same as j_wee_joker, different key
+# ── j_wee (wee joker): permanently gains +8 chips each time a 2 is scored ────
 class _Wee:
     def on_score_card(self, inst, card, ctx):
         if card.rank == 2 and not card.debuffed:
-            ctx.chips += 8
+            inst.state["chips"] = inst.state.get("chips", 0) + 8
+    def on_hand_scored(self, inst, ctx):
+        ctx.chips += inst.state.get("chips", 0)
 JOKER_REGISTRY["j_wee"] = _Wee()
 
 # ── j_stone_joker: +25 chips per Stone card in full deck ─────────────────────
@@ -317,13 +315,13 @@ class _BurntJoker:
         inst.state["most_played"] = max(counts, key=counts.get)
 JOKER_REGISTRY["j_burnt_joker"] = _BurntJoker()
 
-# ── j_invisible_joker: after 2 rounds, duplicate a random joker ─────────────
+# ── j_invisible_joker: after 2 rounds, SELL to duplicate a random joker ──────
 class _InvisibleJoker:
     def on_round_end(self, inst, ctx):
         inst.state["rounds"] = inst.state.get("rounds", 0) + 1
-        if inst.state["rounds"] >= 2:
+    def on_sell(self, inst, ctx):
+        if inst.state.get("rounds", 0) >= 2:
             inst.state.setdefault("pending_consumables", []).append("duplicate_joker")
-            inst.state["rounds"] = 0
 JOKER_REGISTRY["j_invisible_joker"] = _InvisibleJoker()
 
 # ── j_perkeo: create Negative Tarot of last consumed card at end of shop ─────
@@ -386,16 +384,17 @@ class _OopsAllSixes:
         inst.state["double_prob"] = True  # probability system reads this
 JOKER_REGISTRY["j_oops_all_sixes"] = _OopsAllSixes()
 
-# ── j_trading_card: first discard each round → $3 + destroy if face card ─────
+# ── j_trading_card: first discard each round destroys random card, earn $3 ────
 class _TradingCard:
     def on_discard(self, inst, cards, ctx):
         if inst.state.get("used"):
             return
         inst.state["used"] = True
         inst.state["pending_money"] = inst.state.get("pending_money", 0) + 3
-        for card in cards:
-            if card.is_face_card:
-                card.debuffed = True  # approximate destroy
+        if cards:
+            import random as _r
+            target = _r.choice(cards)
+            target.debuffed = True  # approximate destroy
     def on_round_end(self, inst, ctx):
         inst.state["used"] = False
 JOKER_REGISTRY["j_trading_card"] = _TradingCard()
@@ -404,22 +403,22 @@ JOKER_REGISTRY["j_trading_card"] = _TradingCard()
 # ECONOMY / GAME STATE JOKERS
 # ════════════════════════════════════════════════════════════════════════════
 
-# ── j_merry_andy: +3 discards each round, -1 hand per round ─────────────────
+# ── j_merry_andy: +3 discards, -1 hand size (passive, constant while owned) ──
+# Applied in game.py _start_blind via joker key check, not cumulative hooks
 class _MerryAndy:
-    def on_hand_scored(self, inst, ctx):
-        pass  # Effect is on game state (discard count), not scoring
+    pass
 JOKER_REGISTRY["j_merry_andy"] = _MerryAndy()
 
-# ── j_troubadour: +2 hand size, -1 hand per round ────────────────────────────
+# ── j_troubadour: +2 hand size, -1 hand per round (passive, constant) ────────
 class _Troubadour:
-    def on_hand_scored(self, inst, ctx):
-        pass  # Effect is on game state (hand size / hand count)
+    pass
 JOKER_REGISTRY["j_troubadour"] = _Troubadour()
 
-# ── j_credit_card: can go $20 into debt ──────────────────────────────────────
+# ── j_credit_card: can go up to -$20 in debt ─────────────────────────────────
+# game.py checks for this joker when validating purchases
 class _CreditCard:
-    def on_hand_scored(self, inst, ctx):
-        pass  # Economic system: allows dollars to go to -20
+    def on_shop_enter(self, inst, ctx):
+        inst.state["debt_limit"] = -20
 JOKER_REGISTRY["j_credit_card"] = _CreditCard()
 
 # ── j_turtle_bean: +5 hand size, -1 per round ────────────────────────────────
@@ -432,16 +431,14 @@ class _TurtleBean:
             inst.state["destroyed"] = True
 JOKER_REGISTRY["j_turtle_bean"] = _TurtleBean()
 
-# ── j_juggler: +1 hand size ───────────────────────────────────────────────────
+# ── j_juggler: +1 hand size (passive, constant while owned) ──────────────────
 class _Juggler:
-    def on_hand_scored(self, inst, ctx):
-        pass  # hand size in game state
+    pass
 JOKER_REGISTRY["j_juggler"] = _Juggler()
 
-# ── j_drunkard: +1 discard per round ─────────────────────────────────────────
+# ── j_drunkard: +1 discard per round (passive, constant while owned) ─────────
 class _Drunkard:
-    def on_hand_scored(self, inst, ctx):
-        pass  # discard count in game state
+    pass
 JOKER_REGISTRY["j_drunkard"] = _Drunkard()
 
 # ── j_chaos: first reroll in shop is free ─────────────────────────────────────
@@ -462,14 +459,19 @@ class _Egg:
         inst.state["sell_value"] = inst.state.get("sell_value", 1) + 3
 JOKER_REGISTRY["j_egg"] = _Egg()
 
-# ── j_delayed_grat: if no discards used this round, earn $2 ──────────────────
+# ── j_delayed_grat: earn $2 per remaining discard if none used by round end ──
+# Note: on_round_end receives ctx=None, so we track discards_left via joker state
 class _DelayedGrat:
     def on_round_end(self, inst, ctx):
         if not inst.state.get("discarded"):
-            inst.state["pending_money"] = inst.state.get("pending_money", 0) + 2
+            remaining = inst.state.get("discards_left", 3)
+            inst.state["pending_money"] = inst.state.get("pending_money", 0) + 2 * remaining
         inst.state["discarded"] = False
     def on_discard(self, inst, cards, ctx):
         inst.state["discarded"] = True
+    def on_hand_scored(self, inst, ctx):
+        # Track discards_left for round_end (ctx is available here)
+        inst.state["discards_left"] = ctx.discards_left
 JOKER_REGISTRY["j_delayed_grat"] = _DelayedGrat()
 
 # ── j_faceless: earn $5 if 3+ face cards discarded at once ────────────────────
@@ -507,19 +509,21 @@ class _DietCola:
         inst.state["pending_consumables"] = inst.state.get("pending_consumables", []) + ["double_tag"]
 JOKER_REGISTRY["j_diet_cola"] = _DietCola()
 
-# ── j_flash: +2 mult per upgrade from Foil/Holo/Poly card played ─────────────
+# ── j_flash: +2 Mult permanently per shop reroll used ────────────────────────
+# Tracks rerolls via on_reroll hook (called from shop.py reroll_shop)
 class _Flash:
-    def on_score_card(self, inst, card, ctx):
-        if card.edition in ("Foil", "Holographic", "Polychrome") and not card.debuffed:
-            inst.state["mult"] = inst.state.get("mult", 0) + 2
+    def on_reroll(self, inst, ctx):
+        inst.state["mult"] = inst.state.get("mult", 0) + 2
     def on_hand_scored(self, inst, ctx):
         ctx.mult += inst.state.get("mult", 0)
 JOKER_REGISTRY["j_flash"] = _Flash()
 
-# ── j_ceremonial: gains +2 mult per destroyed Joker to the right ────────────
+# ── j_ceremonial: destroy Joker to right on blind select, gain 2x its sell value as Mult
 class _Ceremonial:
-    def on_joker_destroyed(self, inst, ctx):
-        inst.state["mult"] = inst.state.get("mult", 0) + 2
+    def on_blind_selected(self, inst, ctx):
+        # Find this joker's index and destroy the one to its right
+        # (handled via pending state — game.py applies after all hooks fire)
+        inst.state["destroy_right"] = True
     def on_hand_scored(self, inst, ctx):
         ctx.mult += inst.state.get("mult", 0)
 JOKER_REGISTRY["j_ceremonial"] = _Ceremonial()
@@ -538,11 +542,11 @@ class _Certificate:
         inst.state.setdefault("pending_consumables", []).append("random_enhanced_card")
 JOKER_REGISTRY["j_certificate"] = _Certificate()
 
-# ── j_swashbuckler: already in scaling.py — adds sell value of all jokers as mult
-# Re-implement properly:
+# ── j_swashbuckler: Mult equals total sell value of all owned Jokers ─────────
 class _Swashbuckler:
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += ctx.n_jokers  # approximate: +1 mult per joker
+        total_sell = sum(j.state.get("sell_value", 2) for j in ctx.jokers)
+        ctx.mult += total_sell
 JOKER_REGISTRY["j_swashbuckler"] = _Swashbuckler()
 
 # ── j_smeared_joker: already handled by pre_score flag above ─────────────────
@@ -558,12 +562,12 @@ class _CardSharp:
         inst.state["played_hands"] = set()
 JOKER_REGISTRY["j_card_sharp"] = _CardSharp()
 
-# ── j_reserved_parking: already in economy.py — 1/2 chance +$1 per face card scored
-# (Re-register with correct economy tracking)
+# ── j_reserved_parking: 1/2 chance +$1 per face card HELD IN HAND ────────────
 class _ReservedParking:
-    def on_score_card(self, inst, card, ctx):
-        if ctx.is_face_card(card) and not card.debuffed and _random.random() < 0.5:
-            ctx.pending_money = getattr(ctx, "pending_money", 0) + 1
+    def on_hand_scored(self, inst, ctx):
+        for c in ctx.all_cards:
+            if ctx.is_face_card(c) and not c.debuffed and _random.random() < 0.5:
+                ctx.pending_money += 1
 JOKER_REGISTRY["j_reserved_parking"] = _ReservedParking()
 
 # ── j_throwback_fix: x0.25 per blind skipped since this joker owned ──────────

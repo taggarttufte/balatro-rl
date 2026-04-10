@@ -95,63 +95,61 @@ def evaluate_hand(cards: list[Card]) -> tuple[str, list[Card]]:
 
     # Flush Five: 5 cards, all same rank, all same suit
     if n >= 5 and freq.get(5, 0) >= 1 and flush:
-        scoring = active
-        return "Flush Five", scoring
+        return "Flush Five", active + stones
 
     # Flush House: Full house where all 5 cards same suit
     if n >= 5 and freq.get(3, 0) >= 1 and freq.get(2, 0) >= 1 and flush:
-        scoring = active
-        return "Flush House", scoring
+        return "Flush House", active + stones
 
     # Five of a Kind: 5 same rank
     if freq.get(5, 0) >= 1:
         rank = [r for r, c in rank_counts.items() if c == 5][0]
         scoring = [c for c in active if c.rank == rank]
-        return "Five of a Kind", scoring
+        return "Five of a Kind", scoring + stones
 
     # Straight Flush
     if straight and flush:
-        return "Straight Flush", active
+        return "Straight Flush", active + stones
 
     # Four of a Kind
     if freq.get(4, 0) >= 1:
         rank = [r for r, c in rank_counts.items() if c == 4][0]
         scoring = [c for c in active if c.rank == rank]
-        return "Four of a Kind", scoring
+        return "Four of a Kind", scoring + stones
 
     # Full House
     if freq.get(3, 0) >= 1 and freq.get(2, 0) >= 1:
-        return "Full House", active
+        return "Full House", active + stones
 
     # Flush
     if flush:
-        return "Flush", active
+        return "Flush", active + stones
 
     # Straight
     if straight:
-        return "Straight", active
+        return "Straight", active + stones
 
     # Three of a Kind
     if freq.get(3, 0) >= 1:
         rank = [r for r, c in rank_counts.items() if c == 3][0]
         scoring = [c for c in active if c.rank == rank]
-        return "Three of a Kind", scoring
+        return "Three of a Kind", scoring + stones
 
     # Two Pair
     pairs = [r for r, c in rank_counts.items() if c == 2]
     if len(pairs) >= 2:
         scoring = [c for c in active if c.rank in pairs]
-        return "Two Pair", scoring
+        return "Two Pair", scoring + stones
 
     # Pair
     if len(pairs) == 1:
         scoring = [c for c in active if c.rank == pairs[0]]
-        return "Pair", scoring
+        return "Pair", scoring + stones
 
     # High Card
     best_rank = max(ranks)
     scoring = [c for c in active if c.rank == best_rank][:1]
-    return "High Card", scoring
+    return "High Card", scoring + stones
 
 
 def best_hand_from_subset(cards: list[Card], play_count: int = 5) -> tuple[str, list[Card]]:

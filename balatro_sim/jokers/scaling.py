@@ -66,9 +66,10 @@ JOKER_REGISTRY["j_crazy"] = _Crazy()
 # ── j_droll: already in chips.py ─────────────────────────────────────────────
 
 # ── j_sly: +50 chips if hand contains a Pair ────────────────────────────────
+_PAIR_TYPES = {"Pair", "Two Pair", "Full House", "Four of a Kind", "Five of a Kind", "Flush House", "Flush Five"}
 class _Sly:
     def on_hand_scored(self, inst, ctx):
-        if "Pair" in ctx.hand_type:
+        if ctx.hand_type in _PAIR_TYPES:
             ctx.chips += 50
 JOKER_REGISTRY["j_sly"] = _Sly()
 
@@ -86,17 +87,17 @@ class _Clever:
             ctx.chips += 80
 JOKER_REGISTRY["j_clever"] = _Clever()
 
-# ── j_devious: +100 chips if hand is Straight ───────────────────────────────
+# ── j_devious: +100 chips if hand contains a Straight ───────────────────────
 class _Devious:
     def on_hand_scored(self, inst, ctx):
-        if "Straight" in ctx.hand_type and "Flush" not in ctx.hand_type:
+        if "Straight" in ctx.hand_type:  # includes Straight Flush
             ctx.chips += 100
 JOKER_REGISTRY["j_devious"] = _Devious()
 
-# ── j_crafty: +80 chips if hand is Flush ────────────────────────────────────
+# ── j_crafty: +80 chips if hand contains a Flush ────────────────────────────
 class _Crafty:
     def on_hand_scored(self, inst, ctx):
-        if "Flush" in ctx.hand_type and "Straight" not in ctx.hand_type:
+        if "Flush" in ctx.hand_type:  # includes Straight Flush, Flush House, Flush Five
             ctx.chips += 80
 JOKER_REGISTRY["j_crafty"] = _Crafty()
 
@@ -261,22 +262,20 @@ class _Castle:
         ctx.chips += inst.state.get("chips", 0)
     def on_round_end(self, inst, ctx):
         inst.state["suit"] = _random.choice(self.suits)
+        inst.state["chips"] = 0  # reset each round
 JOKER_REGISTRY["j_castle"] = _Castle()
 
 # ── j_smiley: already in chips.py ────────────────────────────────────────────
 
-# ── j_campfire: x3 mult after each boss beaten, lose x0.3 after each loss ────
+# ── j_campfire: x0.25 Mult per card sold, resets when Boss Blind is defeated ─
 class _Campfire:
-    def __init__(self):
-        pass
-    def on_init(self, inst):
-        inst.state["mult"] = 1.0
     def on_hand_scored(self, inst, ctx):
-        ctx.mult_mult *= inst.state.get("mult", 1.0)
+        xm = 1.0 + inst.state.get("sold", 0) * 0.25
+        ctx.mult_mult *= xm
+    def on_sell(self, inst, ctx):
+        inst.state["sold"] = inst.state.get("sold", 0) + 1
     def on_boss_beaten(self, inst, ctx):
-        inst.state["mult"] = inst.state.get("mult", 1.0) * 3.0
-    def on_loss(self, inst, ctx):
-        inst.state["mult"] = max(0.1, inst.state.get("mult", 1.0) - 0.3)
+        inst.state["sold"] = 0  # reset on boss defeat
 JOKER_REGISTRY["j_campfire"] = _Campfire()
 
 # ── j_golden_ticket: already in economy.py ───────────────────────────────────
@@ -316,11 +315,11 @@ JOKER_REGISTRY["j_throwback"] = _Throwback()
 # ── j_hanging_chad: retrigger first played card 2 times ─────────────────────
 # TODO: retrigger system
 
-# ── j_rough_gem: scored cards with Diamond suit give +30 chips ──────────────
+# ── j_rough_gem: +$1 per Diamond card scored ────────────────────────────────
 class _RoughGem:
     def on_score_card(self, inst, card, ctx):
         if card.suit == "Diamonds" and not card.debuffed:
-            ctx.chips += 30
+            ctx.pending_money += 1
 JOKER_REGISTRY["j_rough_gem"] = _RoughGem()
 
 # ── j_bloodstone: 1 in 2 chance for scored Heart to give +1.5 mult ──────────
@@ -330,11 +329,11 @@ class _Bloodstone:
             ctx.mult_mult *= 1.5
 JOKER_REGISTRY["j_bloodstone"] = _Bloodstone()
 
-# ── j_arrowhead: scored cards with Spade suit give +30 chips ────────────────
+# ── j_arrowhead: +50 chips per Spade card scored ────────────────────────────
 class _Arrowhead:
     def on_score_card(self, inst, card, ctx):
         if card.suit == "Spades" and not card.debuffed:
-            ctx.chips += 30
+            ctx.chips += 50
 JOKER_REGISTRY["j_arrowhead"] = _Arrowhead()
 
 # ── j_onyx_agate: scored cards with Club suit give +7 mult ──────────────────
@@ -344,14 +343,12 @@ class _OnyxAgate:
             ctx.mult += 7
 JOKER_REGISTRY["j_onyx_agate"] = _OnyxAgate()
 
-# ── j_glass_joker: x2 mult, 1 in 4 chance to be destroyed after scoring Glass card
+# ── j_glass_joker: x0.75 Mult for each Glass card in your full deck ──────────
 class _GlassJoker:
     def on_hand_scored(self, inst, ctx):
-        ctx.mult_mult *= 2
-    def on_score_card(self, inst, card, ctx):
-        if card.enhancement == "Glass" and not card.debuffed:
-            if _random.random() < 0.25:
-                inst.state["destroyed"] = True
+        glass_count = sum(1 for c in ctx.all_cards if c.enhancement == "Glass")
+        if glass_count > 0:
+            ctx.mult_mult *= (1.0 + 0.75 * glass_count)
 JOKER_REGISTRY["j_glass_joker"] = _GlassJoker()
 
 # ── j_showman: for each Joker, reroll shop 1 time ───────────────────────────
@@ -377,11 +374,18 @@ JOKER_REGISTRY["j_wee"] = _Wee()
 
 # ── j_merry_andy: already stubbed in chips.py ───────────────────────────────
 
-# ── j_obelisk: x0.2 mult per consecutive hands played without repeating ─────
+# ── j_obelisk: x0.2 Mult per consecutive hand that isn't your most played type
 class _Obelisk:
     def on_hand_scored(self, inst, ctx):
-        # TODO: requires hand type tracking
-        pass
+        counts = inst.state.setdefault("counts", {})
+        counts[ctx.hand_type] = counts.get(ctx.hand_type, 0) + 1
+        most_played = max(counts, key=counts.get)
+        if ctx.hand_type != most_played:
+            inst.state["streak"] = inst.state.get("streak", 0) + 1
+        else:
+            inst.state["streak"] = 0
+        xm = 1.0 + inst.state.get("streak", 0) * 0.2
+        ctx.mult_mult *= xm
 JOKER_REGISTRY["j_obelisk"] = _Obelisk()
 
 # ── j_midas_mask: all face cards become Gold when scored ────────────────────
@@ -438,19 +442,24 @@ JOKER_REGISTRY["j_fortune_teller"] = _FortuneTeller()
 
 # ── j_golden: already in economy.py ──────────────────────────────────────────
 
-# ── j_lucky_cat: +0.25 mult per successful Lucky trigger ────────────────────
+# ── j_lucky_cat: x0.25 xMult per successful Lucky trigger (permanent) ───────
 class _LuckyCat:
     def on_lucky_trigger(self, inst, ctx):
-        inst.state["mult"] = inst.state.get("mult", 0) + 0.25
+        inst.state["xmult"] = inst.state.get("xmult", 1.0) + 0.25
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += inst.state.get("mult", 0)
+        xm = inst.state.get("xmult", 1.0)
+        if xm > 1.0:
+            ctx.mult_mult *= xm
 JOKER_REGISTRY["j_lucky_cat"] = _LuckyCat()
 
-# ── j_baseball: uncommon jokers each give x1.5 mult ─────────────────────────
+# ── j_baseball: each Uncommon Joker gives x1.5 Mult ─────────────────────────
 class _Baseball:
     def on_hand_scored(self, inst, ctx):
-        # TODO: requires joker rarity access
-        pass
+        from ..shop import JOKER_CATALOGUE
+        for j in ctx.jokers:
+            meta = JOKER_CATALOGUE.get(j.key, {})
+            if meta.get("rarity") == "Uncommon":
+                ctx.mult_mult *= 1.5
 JOKER_REGISTRY["j_baseball"] = _Baseball()
 
 # ── j_bull: already done above ───────────────────────────────────────────────
@@ -575,13 +584,14 @@ JOKER_REGISTRY["j_ticket"] = _Ticket()
 
 # ── j_drunkard: already stubbed above ────────────────────────────────────────
 
-# ── j_burglar: +3 mult per hand, -3 mult per discard ────────────────────────
+# ── j_burglar: +3 hands, -3 discards when blind is selected ─────────────────
+# Real Balatro: game-state modifier, not a scoring joker. Gives extra hands
+# but removes all discards. Applied via on_blind_selected hook in game.py.
 class _Burglar:
-    def on_hand_scored(self, inst, ctx):
-        inst.state["mult"] = inst.state.get("mult", 0) + 3
-        ctx.mult += inst.state["mult"]
-    def on_discard(self, inst, cards, ctx):
-        inst.state["mult"] = max(0, inst.state.get("mult", 0) - 3)
+    def on_blind_selected(self, inst, ctx):
+        # game.py reads this state and applies +3 hands, sets discards to 0
+        inst.state["extra_hands"] = 3
+        inst.state["zero_discards"] = True
 JOKER_REGISTRY["j_burglar"] = _Burglar()
 
 # ── j_blackboard: x3 mult if all cards in hand are Spades or Clubs ──────────

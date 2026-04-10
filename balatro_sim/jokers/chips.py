@@ -164,36 +164,39 @@ JOKER_REGISTRY["j_steel_joker"] = _SteelJoker()
 # ── j_pareidolia: all face cards are also considered Kings ──────────────────
 # TODO: card eval modification
 
-# ── j_gros_michel: +15 mult, 1 in 4 chance to be destroyed at end of round ──
+# ── j_gros_michel: +15 mult, 1 in 6 chance to be destroyed at end of round ──
 class _GrosMichel:
     def on_hand_scored(self, inst, ctx):
         ctx.mult += 15
     def on_round_end(self, inst, ctx):
-        if _random.random() < 0.25:
+        if _random.random() < 1/6:
             inst.state["destroyed"] = True  # Signal to remove this joker
 JOKER_REGISTRY["j_gros_michel"] = _GrosMichel()
 
-# ── j_cavendish: +3 mult, replaces Gros Michel if destroyed ─────────────────
+# ── j_cavendish: x3 Mult, 1 in 1000 chance of being destroyed at end of round
 class _Cavendish:
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += 3
+        ctx.mult_mult *= 3
+    def on_round_end(self, inst, ctx):
+        if _random.random() < 0.001:
+            inst.state["destroyed"] = True
 JOKER_REGISTRY["j_cavendish"] = _Cavendish()
 
-# ── j_card_sharp: +3 mult if poker hand already played this round ───────────
-class _CardSharp:
-    def on_hand_scored(self, inst, ctx):
-        # TODO: requires tracking played hands this round
-        pass
-JOKER_REGISTRY["j_card_sharp"] = _CardSharp()
+# ── j_card_sharp: already in misc.py (tracks played hands this round) ───────
 
 # ── j_red_card: already in economy.py ────────────────────────────────────────
 
-# ── j_madness: small/big blinds give +2 mult when skipped ───────────────────
+# ── j_madness: x0.5 Mult, destroys random joker when Small/Big blind selected
+# Gains x0.5 Mult each time. Very dangerous but powerful scaling.
 class _Madness:
-    def on_blind_skipped(self, inst, ctx):
-        inst.state["mult"] = inst.state.get("mult", 0) + 2
+    def on_blind_selected(self, inst, ctx):
+        # Only on Small/Big, not Boss
+        inst.state["xmult"] = inst.state.get("xmult", 0.0) + 0.5
+        inst.state["destroy_random"] = True  # game.py handles destruction
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += inst.state.get("mult", 0)
+        xm = inst.state.get("xmult", 0.5)
+        if xm > 0:
+            ctx.mult_mult *= xm
 JOKER_REGISTRY["j_madness"] = _Madness()
 
 # ── j_square_joker: gains +4 chips if hand has exactly 4 cards ──────────────
@@ -210,33 +213,36 @@ JOKER_REGISTRY["j_square_joker"] = _SquareJoker()
 # ── j_riff_raff: when blind selected, create 2 common jokers ────────────────
 # TODO: joker creation
 
-# ── j_vampire: remove enhancement from scored card, gain +0.2 mult ───────────
+# ── j_vampire: remove enhancement from scored card, gain x0.1 xMult per card ─
 class _Vampire:
     def on_score_card(self, inst, card, ctx):
-        if card.enhancement and card.enhancement != "Base" and not card.debuffed:
-            inst.state["mult"] = inst.state.get("mult", 0) + 0.2
-            card.enhancement = "Base"  # Remove enhancement
+        if card.enhancement and card.enhancement not in ("None", "Base") and not card.debuffed:
+            inst.state["xmult"] = inst.state.get("xmult", 1.0) + 0.1
+            card.enhancement = "None"
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += inst.state.get("mult", 0)
+        xm = inst.state.get("xmult", 1.0)
+        if xm > 1.0:
+            ctx.mult_mult *= xm
 JOKER_REGISTRY["j_vampire"] = _Vampire()
 
 # ── j_shortcut: allows Straights to be made with gaps of 1 rank ─────────────
 # TODO: hand eval modification
 
-# ── j_hologram: +5 mult per playing card added to deck ──────────────────────
+# ── j_hologram: x0.25 Mult per playing card added to deck ────────────────────
 class _Hologram:
     def on_card_added(self, inst, ctx):
-        inst.state["mult"] = inst.state.get("mult", 0) + 5
+        inst.state["xmult"] = inst.state.get("xmult", 1.0) + 0.25
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += inst.state.get("mult", 0)
+        xm = inst.state.get("xmult", 1.0)
+        if xm > 1.0:
+            ctx.mult_mult *= xm
 JOKER_REGISTRY["j_hologram"] = _Hologram()
 
-# ── j_vagabond: +20 chips if hand contains no face cards ────────────────────
+# ── j_vagabond: create Tarot if $4 or less when hand is played ───────────────
 class _Vagabond:
     def on_hand_scored(self, inst, ctx):
-        has_face = any(c.is_face_card for c in ctx.scoring_cards if not c.debuffed)
-        if not has_face:
-            ctx.chips += 20
+        if ctx.dollars <= 4:
+            ctx.pending_consumables.append("tarot")
 JOKER_REGISTRY["j_vagabond"] = _Vagabond()
 
 # ── j_cloud_9: +5 mult per 9 in full deck (max 1 per 9) ─────────────────────
@@ -264,14 +270,18 @@ JOKER_REGISTRY["j_seeing_double"] = _SeeingDouble()
 # ── j_matador: earn $8 if triggered Boss Blind ability is blocked ───────────
 # TODO: boss blind system
 
-# ── j_hit_the_road: +3 mult per Jack discarded this round ───────────────────
+# ── j_hit_the_road: x0.5 xMult per Jack discarded this round ────────────────
 class _HitTheRoad:
     def on_discard(self, inst, cards, ctx):
         for card in cards:
             if card.rank == 11:  # Jack
-                inst.state["mult"] = inst.state.get("mult", 0) + 3
+                inst.state["xmult"] = inst.state.get("xmult", 1.0) + 0.5
     def on_hand_scored(self, inst, ctx):
-        ctx.mult += inst.state.get("mult", 0)
+        xm = inst.state.get("xmult", 1.0)
+        if xm > 1.0:
+            ctx.mult_mult *= xm
+    def on_round_end(self, inst, ctx):
+        inst.state["xmult"] = 1.0  # reset each round
 JOKER_REGISTRY["j_hit_the_road"] = _HitTheRoad()
 
 # ── j_duo: +2 mult if hand contains a Pair ──────────────────────────────────
@@ -350,15 +360,13 @@ class _Bootstraps:
         ctx.mult += bonus
 JOKER_REGISTRY["j_bootstraps"] = _Bootstraps()
 
-# ── j_caino: x1 mult per card destroyed (x1.5 if face card) ─────────────────
+# ── j_caino: x1 Mult, gains x0.1 when a face card is destroyed ──────────────
 class _Caino:
     def on_card_destroyed(self, inst, card, ctx):
         if card.is_face_card:
-            inst.state["mult"] = inst.state.get("mult", 1.0) * 1.5
-        else:
-            inst.state["mult"] = inst.state.get("mult", 1.0) * 1.0
+            inst.state["xmult"] = inst.state.get("xmult", 1.0) + 0.1
     def on_hand_scored(self, inst, ctx):
-        ctx.mult_mult *= inst.state.get("mult", 1.0)
+        ctx.mult_mult *= inst.state.get("xmult", 1.0)
 JOKER_REGISTRY["j_caino"] = _Caino()
 
 # ── j_triboulet: x2 mult per King or Queen scored ───────────────────────────
@@ -368,13 +376,13 @@ class _Triboulet:
             ctx.mult_mult *= 2
 JOKER_REGISTRY["j_triboulet"] = _Triboulet()
 
-# ── j_yorick: +5 mult per 23 cards discarded (deck + 3 copies) ──────────────
+# ── j_yorick: x1 Mult, gains x1 per 23 cards discarded ──────────────────────
 class _Yorick:
     def on_discard(self, inst, cards, ctx):
         inst.state["discarded"] = inst.state.get("discarded", 0) + len(cards)
     def on_hand_scored(self, inst, ctx):
         sets = inst.state.get("discarded", 0) // 23
-        ctx.mult += 5 * sets
+        ctx.mult_mult *= (1.0 + sets)
 JOKER_REGISTRY["j_yorick"] = _Yorick()
 
 # ── j_chicot: disables all Boss Blind effects ───────────────────────────────

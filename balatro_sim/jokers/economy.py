@@ -11,9 +11,13 @@ class _Golden:
 JOKER_REGISTRY["j_golden"] = _Golden()
 
 # ── j_to_the_moon: +$1 interest per $5 held (extra interest) ─────────────────
+# Note: on_round_end receives ctx=None, so we track dollars via joker state
 class _ToTheMoon:
+    def on_hand_scored(self, inst, ctx):
+        inst.state["dollars"] = ctx.dollars  # track for round_end
     def on_round_end(self, inst, ctx):
-        extra = ctx.dollars // 5
+        dollars = inst.state.get("dollars", 0)
+        extra = dollars // 5
         inst.state["pending_money"] = inst.state.get("pending_money", 0) + extra
 JOKER_REGISTRY["j_to_the_moon"] = _ToTheMoon()
 
@@ -64,18 +68,19 @@ JOKER_REGISTRY["j_lucky_joker"] = _LuckyJoker()
 # ── j_chaos: free reroll in shop ──────────────────────────────────────────────
 # TODO: shop system
 
-# ── j_red_card: +3 mult when a skip tag is activated ─────────────────────────
+# ── j_red_card: +3 Mult permanently when any Booster Pack is skipped ─────────
 class _RedCard:
-    def on_tag_skipped(self, inst, ctx):
+    def on_booster_skipped(self, inst, ctx):
         inst.state["mult"] = inst.state.get("mult", 0) + 3
     def on_hand_scored(self, inst, ctx):
         ctx.mult += inst.state.get("mult", 0)
 JOKER_REGISTRY["j_red_card"] = _RedCard()
 
-# ── j_odd_todd: +31 chips if hand played contains an Odd number of cards ──────
+# ── j_odd_todd: +31 chips per played card with odd rank (A,9,7,5,3) ──────────
 class _OddTodd:
-    def on_hand_scored(self, inst, ctx):
-        if len(ctx.scoring_cards) % 2 == 1:
+    ODD_RANKS = {14, 9, 7, 5, 3}  # A=14, 9, 7, 5, 3
+    def on_score_card(self, inst, card, ctx):
+        if card.rank in self.ODD_RANKS and not card.debuffed:
             ctx.chips += 31
 JOKER_REGISTRY["j_odd_todd"] = _OddTodd()
 

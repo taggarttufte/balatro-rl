@@ -77,8 +77,9 @@ from .quality import loadout_quality
 # ════════════════════════════════════════════════════════════════════════════
 
 COMM_DIM   = 32          # communication vector size (shop -> play)
-PLAY_OBS_BASE = 342      # from env_sim.py
-PLAY_OBS_DIM  = PLAY_OBS_BASE + COMM_DIM   # 374
+from .env_sim import OBS_DIM as _SIM_OBS_DIM
+PLAY_OBS_BASE = _SIM_OBS_DIM   # from env_sim.py (402 with shop context features)
+PLAY_OBS_DIM  = PLAY_OBS_BASE + COMM_DIM   # 434
 
 # Shop obs dimensions
 SHOP_SCALARS     = 10    # ante, round, dollars, interest, hands_left, reroll_cost,
@@ -127,6 +128,14 @@ R_SCORE_PROGRESS= 0.05
 R_QUALITY_SCALE = 0.5   # loadout quality delta per shop phase (bumped from 0.2)
 R_LEAVE_SHOP    = -0.1  # small penalty for leaving shop — encourages exploration
 R_SPEND         = 0.05  # reward per dollar spent — incentivizes buying over hoarding
+
+# Heuristic reward shaping (mirrors V4 Lua shop heuristic)
+# Small bonuses for taking "smart" actions — agent can still learn to deviate
+R_HEUR_BUY_JOKER     = 0.3   # bought a joker (filling empty slots is always good)
+R_HEUR_UPGRADE       = 0.5   # sold weak joker and bought a stronger one
+R_HEUR_USE_PLANET    = 0.2   # used a planet card (free hand upgrade)
+R_HEUR_REROLL_SMART  = 0.1   # rerolled when nothing useful and can afford it
+R_HEUR_LEAVE_EMPTY   = -0.2  # left shop with unspent money and empty joker slots
 
 # Pack sub-states
 SUBSTATE_NORMAL      = "normal"
@@ -298,6 +307,13 @@ class BalatroSimEnvV5(gym.Env):
         if state == State.BLIND_SELECT:
             if action == 31 and gs.blind_idx != 2:
                 game.step({"type": "skip_blind"})
+                # Skip enters shop — initialize quality baseline
+                if game.state == State.SHOP:
+                    self._prev_quality = loadout_quality(
+                        game.jokers,
+                        [game.planet_levels.get(ht, 1) for ht in HAND_TYPES],
+                        game.deck,
+                    )
             else:
                 game.step({"type": "play_blind"})
 
@@ -374,6 +390,16 @@ class BalatroSimEnvV5(gym.Env):
         game = self.game
 
         if action == 0:      # reroll
+            # Heuristic: reroll is smart if nothing useful in shop and can afford it
+            cost = max(0, game.reroll_cost - game.reroll_discount)
+            has_affordable_joker = any(
+                i.kind == "joker" and not i.sold
+                and game.dollars >= i.discounted_price(game.shop_discount)
+                and len(game.jokers) < game.joker_slots
+                for i in game.current_shop
+            )
+            if not has_affordable_joker and game.dollars > cost * 2:
+                reward += R_HEUR_REROLL_SMART
             reroll_shop(game)
 
         elif action == 1:    # leave shop
@@ -386,6 +412,15 @@ class BalatroSimEnvV5(gym.Env):
             quality_delta = curr_quality - prev_quality
             reward += R_QUALITY_SCALE * quality_delta
             reward += R_LEAVE_SHOP   # small penalty to discourage always leaving
+            # Heuristic: penalize leaving with money and empty joker slots
+            if len(game.jokers) < game.joker_slots:
+                affordable = any(
+                    i.kind == "joker" and not i.sold
+                    and game.dollars >= i.discounted_price(game.shop_discount)
+                    for i in game.current_shop
+                )
+                if affordable:
+                    reward += R_HEUR_LEAVE_EMPTY  # leaving when you could buy
             self._prev_quality = curr_quality
             game.step({"type": "leave_shop"})
 
@@ -401,11 +436,15 @@ class BalatroSimEnvV5(gym.Env):
                         reward += R_SPEND * price
                         self._enter_pack_open(game)
                 else:
+                    n_jokers_before = len(game.jokers)
                     before = game.dollars
                     buy_item(game, item)
                     spent = before - game.dollars
                     if spent > 0:
                         reward += R_SPEND * spent
+                        # Heuristic: bonus for buying a joker into an empty slot
+                        if item.kind == "joker" and len(game.jokers) > n_jokers_before:
+                            reward += R_HEUR_BUY_JOKER
 
         elif action in (8, 9):  # buy booster pack 0-1
             pack_idx = action - 8
@@ -420,7 +459,25 @@ class BalatroSimEnvV5(gym.Env):
 
         elif 10 <= action <= 14:  # sell joker 0-4
             joker_idx = action - 10
-            sell_joker(game, joker_idx)
+            if joker_idx < len(game.jokers):
+                sold_joker = game.jokers[joker_idx]
+                sold_value = _joker_value(sold_joker)
+                # Check if there's a better joker in the shop we could buy after selling
+                sell_price = sold_joker.state.get("sell_value", 2)
+                budget_after = game.dollars + sell_price
+                best_shop_value = 0
+                for item in game.current_shop:
+                    if item.kind == "joker" and not item.sold:
+                        if budget_after >= item.discounted_price(game.shop_discount):
+                            best_shop_value = max(best_shop_value, _joker_value(
+                                type('FakeJoker', (), {'key': item.key, 'edition': item.edition})()
+                            ))
+                # Heuristic: reward sell-upgrade (sell weak, buy strong)
+                if best_shop_value > sold_value:
+                    reward += R_HEUR_UPGRADE
+                sell_joker(game, joker_idx)
+            else:
+                sell_joker(game, joker_idx)
 
         elif action in (15, 16):  # use consumable 0-1
             cons_idx = action - 15
@@ -430,6 +487,7 @@ class BalatroSimEnvV5(gym.Env):
                 if ckey in ALL_PLANETS:
                     apply_planet(game, ckey)
                     game.consumable_hand.pop(cons_idx)
+                    reward += R_HEUR_USE_PLANET  # Heuristic: planets are always good
                 elif ckey in ALL_TAROTS:
                     # Tarots that don't need a card target can fire immediately
                     # Tarots that need targets → enter PACK_TARGET substate
@@ -778,18 +836,32 @@ class BalatroSimEnvV5(gym.Env):
             self._play_combos = []
             return
 
-        combos = []
+        from .hand_eval import evaluate_hand as _eval_hand, HAND_PRIORITY as _HP
+        scored = []
         for size in range(1, min(n, 5) + 1):
             for combo in _combinations(list(range(n)), size):
                 cards = [hand[i] for i in combo]
                 try:
-                    score, _ = score_hand(cards, list(combo), gs)
+                    hand_type, scoring_cards = _eval_hand(cards)
+                    priority = _HP.index(hand_type) if hand_type in _HP else 99
+                    actual_score, _ = score_hand(
+                        scoring_cards=scoring_cards,
+                        all_cards=cards,
+                        hand_type=hand_type,
+                        jokers=gs.jokers,
+                        planet_levels=gs.planet_levels,
+                        hands_left=gs.hands_left,
+                        discards_left=gs.discards_left,
+                        dollars=gs.dollars,
+                        ante=gs.ante,
+                        deck_remaining=len(gs.deck),
+                    )
+                    scored.append((-priority, actual_score, list(combo)))
                 except Exception:
-                    score = 0
-                combos.append((score, list(combo)))
+                    pass
 
-        combos.sort(key=lambda x: x[0], reverse=True)
-        self._play_combos = [c for _, c in combos[:20]]
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        self._play_combos = [s[2] for s in scored[:20]]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -836,6 +908,17 @@ _NO_TARGET_TAROTS = {
 def _tarot_needs_target(key: str) -> bool:
     """Return True if this tarot requires selecting deck cards as targets."""
     return key in _TARGETING_TAROTS and key not in _NO_TARGET_TAROTS
+
+
+def _joker_value(joker) -> float:
+    """Score a joker instance by rarity + edition (mirrors V4 Lua heuristic).
+    Higher = better. Used for sell-upgrade decisions."""
+    rarity_score = {"Common": 10, "Uncommon": 20, "Rare": 30, "Legendary": 40}
+    meta = JOKER_CATALOGUE.get(joker.key, {})
+    base = rarity_score.get(meta.get("rarity", "Common"), 10)
+    edition_bonus = {"Polychrome": 10, "Holographic": 5, "Foil": 3, "Negative": 50}
+    base += edition_bonus.get(getattr(joker, "edition", "None"), 0)
+    return base
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -33,7 +33,7 @@ def _score_single_card(card: Card, ctx: ScoreContext, jokers: list[JokerInstance
         ctx.mult_mult *= 2.0
     elif card.enhancement == "Lucky":
         import random
-        if random.random() < 1/5:
+        if random.random() < 1/4:   # real Balatro: 1 in 4 chance
             ctx.mult += 20
         if random.random() < 1/15:
             ctx.pending_money += 20

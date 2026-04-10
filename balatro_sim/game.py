@@ -217,7 +217,28 @@ class BalatroGame:
         self.chips_scored = 0
         self.hands_left = self.base_hands
         self.discards_left = self.base_discards
+        self.hand_size = HAND_SIZE  # reset to base before applying joker passives
         self.played_hand_types_this_round = set()
+
+        # Apply passive joker effects (constant while owned, not cumulative)
+        joker_keys = {j.key for j in self.jokers}
+        if "j_juggler" in joker_keys:
+            self.hand_size += 1
+        if "j_drunkard" in joker_keys:
+            self.discards_left += 1
+        if "j_troubadour" in joker_keys:
+            self.hand_size += 2
+            self.hands_left = max(1, self.hands_left - 1)
+        if "j_merry_andy" in joker_keys:
+            self.discards_left += 3
+            self.hand_size = max(1, self.hand_size - 1)
+
+        # Apply voucher hand size adjustments
+        if "v_paint_brush" in self.vouchers:
+            self.hand_size += 1
+        if "v_palette" in self.vouchers:
+            self.hand_size += 1
+
         self._init_deck()
         self._draw_to_full()
         # Apply boss debuffs
@@ -235,6 +256,32 @@ class BalatroGame:
             if "planet_upgrade" in j.state:
                 ht = j.state.pop("planet_upgrade")
                 self.planet_levels[ht] = self.planet_levels.get(ht, 1) + 1
+            # Event-based game-state modifiers (Burglar — fires once per blind)
+            extra_hands = j.state.pop("extra_hands", 0)
+            if extra_hands:
+                self.hands_left += extra_hands
+            if j.state.pop("zero_discards", False):
+                self.discards_left = 0
+        # Ceremonial Dagger: destroy joker to the right, gain 2x sell value as mult
+        to_destroy = []
+        for i, j in enumerate(self.jokers):
+            if j.state.pop("destroy_right", False) and i + 1 < len(self.jokers):
+                target = self.jokers[i + 1]
+                sell_val = target.state.get("sell_value", 2)
+                j.state["mult"] = j.state.get("mult", 0) + sell_val * 2
+                to_destroy.append(i + 1)
+        for idx in sorted(to_destroy, reverse=True):
+            self.jokers.pop(idx)
+        # Madness: destroy a random OTHER joker on Small/Big blind
+        madness_destroy = []
+        for i, j in enumerate(self.jokers):
+            if j.state.pop("destroy_random", False):
+                others = [k for k in range(len(self.jokers)) if k != i]
+                if others:
+                    madness_destroy.append(self.rng.choice(others))
+        for idx in sorted(set(madness_destroy), reverse=True):
+            if idx < len(self.jokers):
+                self.jokers.pop(idx)
         self.state = State.SELECTING_HAND
 
     def _apply_boss_start(self, boss_key: str):
@@ -366,12 +413,20 @@ class BalatroGame:
         # Boss: eye — can't play same hand type twice
         if self.current_blind.boss_key == "bl_eye":
             if hand_type in self.played_hand_types_this_round:
-                return  # illegal action
+                # Rejected — still costs a hand to prevent infinite loops
+                self.hands_left -= 1
+                if self.hands_left <= 0:
+                    self.state = State.GAME_OVER
+                return
 
         # Boss: mouth — can only play first hand type used
         if self.current_blind.boss_key == "bl_mouth":
             if self.played_hand_types_this_round and \
                hand_type not in self.played_hand_types_this_round:
+                # Rejected — still costs a hand to prevent infinite loops
+                self.hands_left -= 1
+                if self.hands_left <= 0:
+                    self.state = State.GAME_OVER
                 return
 
         self.played_hand_types_this_round.add(hand_type)
@@ -494,8 +549,11 @@ class BalatroGame:
                     effect.on_boss_beaten(j, None)
             self._undo_boss_debuffs(self.current_blind.boss_key)
 
+        # Pre-compute deck stats for jokers that need them (e.g. Cloud 9)
+        deck_nines = sum(1 for c in self.deck + self.hand if c.rank == 9)
         # Fire on_round_end hooks; collect pending money and consumables
         for j in self.jokers:
+            j.state["deck_nines"] = deck_nines  # for Cloud 9
             effect = JOKER_REGISTRY.get(j.key)
             if effect and hasattr(effect, "on_round_end"):
                 effect.on_round_end(j, None)
