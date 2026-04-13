@@ -2,7 +2,7 @@
 
 A reinforcement learning agent that learns to play [Balatro](https://www.playbalatro.com/) using PPO.
 
-Seven versions over five months: from a Lua mod with file-based IPC, through socket parallelism, a failed dual-agent experiment, a complete Python simulation (V6: 1.9% win rate), and a hierarchical intent + learned card selection architecture (V7: 2.35% win rate after 6 reward tuning runs). Six distinct V7 runs explored reward shaping to push past the 2% plateau — the agent learned strategic card play from scratch but couldn't break the Green+Space joker lock-in.
+Eight versions over five months: from a Lua mod with file-based IPC, through socket parallelism, a failed dual-agent experiment, a complete Python simulation (V6: 1.9% win rate), a hierarchical intent + learned card selection architecture (V7: 2.35% win rate after 6 reward tuning runs), and a self-play multiplayer implementation (V8: training with multiplayer-aware observations). V7 broke through 2% win rate but hit a ceiling caused by Green+Space joker lock-in. V8 uses self-play on the multiplayer Balatro ruleset to break that lock-in through same-seed strategy comparison.
 
 > **Disclaimer:** Balatro is a product of LocalThunk/Playstack. This is an unofficial project for research and educational purposes only.
 
@@ -37,25 +37,42 @@ A skilled human wins ~70% of runs. Random play wins <0.01%.
 | V4 | Python sim, single agent | 16 workers | inflated* | Sim works, combo ranking helps enormously |
 | V5 | Python sim, dual agent | 16 workers | 0% | Shop starvation is structural -- failed after 12 runs |
 | V6 | Python sim, single agent | 16 workers | 1.9% | Sim audit + heuristic rewards, combo ranker is the ceiling |
-| **V7** | **Hierarchical intent + learned card selection** | **16 workers** | **2.35%** | **Agent can learn card play from reward, but shop strategy plateaus at ~2%** |
-| V8 | TBD | TBD | Target: 5%+ | Curriculum learning / search-guided imitation |
+| V7 | Hierarchical intent + learned card selection | 16 workers | 2.35% | Agent can learn card play from reward, but shop strategy plateaus at ~2% |
+| **V8** | **Self-play multiplayer with MP-aware obs** | **20 workers** | **In training** | **Same-seed self-play to break Green+Space lock-in; multiplayer state in obs** |
 
 *V4 produced 35k+ wins across 6 training runs, but all results were inflated by two issues discovered later in V6: (1) fixed seeds caused memorization (agent won on ~16k unique seeds out of 2^31 possible), and (2) the Burglar joker was incorrectly implemented as a scaling mult engine (+3 mult/hand, accumulating permanently) instead of a hand modifier (+3 hands, -3 discards). The agent's dominant strategy (Burglar + Green Joker + Space Joker producing 612M chip Pairs) was entirely a training artifact. **V6 Run 6 (1.9% win rate) is the first legitimate measurement** -- random seeds, fully audited sim, no broken jokers.
 
 ### Throughput Progression
 
-| Version | Method | Steps/sec | vs V1 |
-|---------|--------|:---------:|:-----:|
-| V1 | File IPC, SB3, 1 env | ~0.08 | 1x |
-| V2 | File IPC, Ray, 8 envs | ~6 | 75x |
-| V3 | Socket IPC, 8 envs | ~14* | 175x |
-| V4-V6 | Python sim, 16 workers | ~4,000 | 50,000x |
+| Version | Method | Steps/sec (raw sim) | Training sps (16-20 workers) | vs V1 |
+|---------|--------|:---------:|:---------:|:-----:|
+| V1 | File IPC, SB3, 1 env | ~0.08 | — | 1x |
+| V2 | File IPC, Ray, 8 envs | ~6 | — | 75x |
+| V3 | Socket IPC, 8 envs | ~14* | — | 175x |
+| V4-V6 | Python sim, 16 workers | ~1,000 | ~900-1000 | ~12,500x |
+| V7 | +score_hand vectorization | **~1,535** | **~985** | ~19,000x |
+| V7 | +batched inference (4e/worker) | ~1,535 | ~862 (4w×4e config) | — |
+| **V8** | MP env + extended obs (20 workers) | ~1,400 | **~780** | — |
 
 *V3 degraded from ~39 sps to ~14 sps over training due to Lua GC / RAM issues.
 
+**V7 → V8 throughput regression (~20% slower):**
+- Each V8 MP step is effectively 2 agent-steps (both players act)
+- Look-ahead win evaluation adds simulation work at game end
+- Extended obs (434 → 438) slightly larger network forward pass
+- Draw detection / life tracking / PvP resolution overhead
+
+**V7 → V8 optimizations partially offsetting:**
+- `_best_hand_score` vectorization: 218 subsets → 8 candidates via priority filtering (lossless, 1.5x)
+- Batched inference within workers for multi-env configs
+- Hyperthreading sweet spot at 20 workers on 16-core Ryzen 9 7950X (~2-5% gain)
+- Auto-placed positional jokers (Blueprint/Brainstorm/Ceremonial) avoid wasted moves
+
+Net effect: V8 at ~780 sps feels comparable to V7 in practice because each V8 step generates 2x the training data (one trajectory per player on same seed). Effective training data throughput is similar or better.
+
 ---
 
-## Current Version: V6 -- Single Agent with Enhanced Shop Awareness
+## V6 -- Single Agent with Enhanced Shop Awareness
 
 V5's dual-agent architecture (separate play + shop networks with a 32-dim communication vector) failed after 12 training runs due to **shop starvation**: the shop agent received <0.1% of training steps and could never learn. V6 returns to V4's single-agent approach with all lessons applied.
 
@@ -239,11 +256,14 @@ Test suite: **504 tests passing** across joker behavior, scoring, boss blinds, g
 
 ```
 balatro-rl/
-├── train_v7.py               # V7 training -- hierarchical intent + learned card selection (current)
+├── train_v8.py               # V8 training -- self-play multiplayer PPO (current)
+├── train_v7.py               # V7 training -- hierarchical intent + learned card selection
 ├── train_sim.py              # V6 training -- single-agent PPO with pre-ranked combos
 ├── train_v5.py               # V5 training -- dual-agent PPO (deprecated)
 ├── balatro_sim/              # Python Balatro simulation
 │   ├── game.py               # Full game loop (BalatroGame)
+│   ├── env_mp.py             # V8 multiplayer environment (438 obs, self-play)
+│   ├── mp_game.py            # V8 multiplayer coordinator (lives, PvP, phase transitions)
 │   ├── env_v7.py             # V7 environment (434 obs, hierarchical actions)
 │   ├── env_sim.py            # V6 environment (402 obs, 46 actions)
 │   ├── env_v5.py             # V5 dual-agent env (deprecated)
@@ -252,7 +272,7 @@ balatro-rl/
 │   ├── scoring.py            # Chip/mult scoring engine
 │   ├── hand_eval.py          # Hand type evaluation (12 types)
 │   ├── consumables.py        # Planets, tarots, spectrals, vouchers
-│   ├── shop.py               # Shop system, rarity rolls
+│   ├── shop.py               # Shop system, banned-joker filter, rarity rolls
 │   ├── card.py               # Card representation
 │   ├── constants.py          # Game constants
 │   ├── quality.py            # Loadout quality estimator
@@ -260,15 +280,21 @@ balatro-rl/
 │       ├── base.py, chips.py, mult.py, scaling.py
 │       ├── hand_type.py, economy.py, misc.py
 │       └── tests/            # Joker unit tests
-├── tests/                    # Integration tests
+├── tests/                    # Integration tests (496 passing)
+│   ├── test_env_mp.py        # V8 MP env tests (obs extension, banned jokers, etc.)
+│   ├── test_mp_game.py       # V8 MP coordinator tests (lives, PvP resolution)
+│   ├── test_mp_integration.py # V8 full-game integration with scripted policies
 │   ├── test_env_v7.py        # V7 environment + hierarchical action tests
 │   ├── test_card_selection.py # Subset enumeration, boss validation
-│   └── test_*.py             # Joker + game flow tests (504 total passing)
+│   └── test_*.py             # Joker + game flow tests
 ├── scripts/                  # Plotting and analysis
 │   ├── training_report.py    # Training dashboard
 │   ├── plot_runs.py          # Multi-run comparison
 │   └── plot_v5_run8.py, plot_v4.py, plot_training.py
 ├── results/                  # Design notes and run logs
+│   ├── V8_DESIGN_NOTES.md    # V8 architecture spec (self-play, MP obs)
+│   ├── V8_RUN_LOG.md         # V8 training runs (3 runs, Run 3 in progress)
+│   ├── MULTIPLAYER_RULESET.md # Standard Ranked spec from balatromp.com
 │   ├── V7_PLANNING.md        # V7 architecture design (5 approaches analyzed)
 │   ├── V7_RUN_LOG.md         # V7 training runs (6 runs, final 2.35% win rate)
 │   ├── V6_DESIGN_NOTES.md    # V6 design and changes from V4
@@ -276,11 +302,15 @@ balatro-rl/
 │   ├── V5_DESIGN_NOTES.md    # V5 dual-agent spec (for reference)
 │   ├── V5_RUN_LOG.md         # V5 training runs (12 runs, all failed)
 │   └── V4_DESIGN_NOTES.md, V3_DESIGN_NOTES.md, V1/V2 results
+├── checkpoints_v8/           # V8 active model weights + episode logs
+├── checkpoints_v8_run1/      # V8 Run 1 (killed iter 63 — shop-skip bug)
+├── checkpoints_v8_run2/      # V8 Run 2 (killed iter 71 — V7 migration broke competence)
 ├── checkpoints_v7/           # V7 active model weights + episode logs
 ├── checkpoints_v7_run4/      # V7 Run 4 checkpoints (2.35% peak)
 ├── checkpoints_v7_run5/      # V7 Run 5 checkpoints (slot filling peak)
 ├── checkpoints_sim/          # V6 model weights + episode logs
 ├── checkpoints_v5/           # V5 model weights (deprecated)
+├── logs_v8/                  # V8 training logs
 ├── logs_v7/                  # V7 training logs
 ├── logs_sim/                 # V6 training logs, highlight episodes
 ├── legacy/                   # V1-V3 training scripts and tests
@@ -304,7 +334,13 @@ pip install torch numpy gymnasium
 # Run tests
 python -m pytest balatro_sim/jokers/tests/ tests/ -v
 
-# Train V7 (current, hierarchical intent + learned card selection)
+# Train V8 (current — self-play multiplayer, fresh start)
+python train_v8.py --workers 20 --steps-per-worker 1024 --iterations 1000
+
+# Resume V8 from checkpoint
+python train_v8.py --resume checkpoints_v8/iter_0100.pt
+
+# Train V7 (hierarchical intent + learned card selection)
 python train_v7.py --workers 16 --steps-per-worker 2048 --iterations 1000
 
 # Train V7 with V6 weight migration (warm start)
@@ -315,10 +351,7 @@ python train_v7.py --workers 16 --steps-per-worker 2048 --iterations 1000 \
 python train_sim.py --workers 16 --steps-per-worker 2048 --iterations 1000
 
 # Smaller batch for smoke testing
-python train_v7.py --workers 4 --steps-per-worker 256 --iterations 10
-
-# Resume from V7 checkpoint
-python train_v7.py --resume checkpoints_v7/iter_0200.pt
+python train_v8.py --workers 4 --steps-per-worker 256 --iterations 10
 
 # Benchmark sim throughput
 python -m balatro_sim.env_sim
@@ -429,19 +462,158 @@ structural, not a reward tuning issue:
 4. **Local optimum lock-in** — once the agent converges to Green+Space, every reward
    tweak creates a new local optimum around that strategy.
 
-### Next Steps (V8)
+---
 
-Options for breaking the 2% plateau:
+## V8 — Self-Play Multiplayer with MP-Aware Observations (current)
 
-1. **Curriculum learning** — Train without Green+Space for first 500k steps to force
-   learning alternatives, then re-enable. Most promising given V7 findings.
-2. **Search-guided imitation** — Monte Carlo search to find winning strategies per game,
-   supervise the policy on those decisions. Proven technique from AlphaGo.
-3. **Population-based training** — Multiple agents with different reward weights,
-   periodic selection and crossover.
-4. **Larger network** — 2.5M params may be too small for conditional strategy. Try 10M+.
-5. **Add move_joker action** — Explicit joker reordering so Blueprint/Brainstorm can be
-   used strategically by the agent, not just auto-placed.
+V7 hit a 2% ceiling because the agent locked into a single dominant strategy
+(Green Joker + Space Joker). Six runs of reward shaping couldn't break it.
+The fundamental issue: PPO with averaged rewards across games can't discover
+specific multi-step coordinated strategies because the signal is too diluted.
+
+V8's hypothesis: **same-seed self-play gives PPO direct differential gradient
+signal.** When two policies face identical game states and one wins, PPO sees
+exactly which strategy was better. The multiplayer boss blind also creates
+burst-scoring pressure that naturally favors different strategies than long-term
+scaling (which is what Green+Space optimize for).
+
+### Architecture
+
+V8 implements the Balatro Multiplayer mod's Standard Ranked ruleset with one
+house rule change:
+
+```
+Each ante: Small Blind → Big Blind → PvP Boss Blind
+  Both players play all blinds on the SAME SEED
+  Independent shops (different random offerings per player)
+  4 lives per player
+  HOUSE RULE: failing ANY blind costs a life (vs official mod: only PvP)
+  PvP blind: higher score wins, loser loses a life + gets comeback money ($4/life)
+  Game ends at 0 lives; survivor wins, ties broken by ante progression
+  Auto-placed positional jokers (Blueprint/Brainstorm/Ceremonial)
+  4 banned jokers from ranked ruleset (Chicot, Matador, Mr. Bones, Luchador)
+```
+
+### Network (extended from V7)
+
+```
+Input (438) → Embed(512, ReLU) → 4x ResBlock(512) → trunk (512)
+  [V7 obs 434 dims: hand, jokers, shop, planets, consumables, shop context]
+  [V8 extension +4 dims: self_lives/4, opp_lives/4, opp_pvp_score_ratio, is_pvp_blind]
+
+SELECTING_HAND:
+  trunk → intent_head(3)                              → PLAY/DISCARD/USE_CONSUMABLE
+  trunk + intent_embed(32) → card_head(8, sigmoid)    → card scores
+  card_scores → 218 subsets → softmax → sample
+
+Other phases:
+  trunk → phase_head(17)                              → blind/shop actions
+
+Shared:
+  trunk → critic(1)                                   → value
+
+~2.48M params
+```
+
+### Reward Structure (V7 base + V8 multiplayer layer)
+
+**V7 base rewards** (per player, per step):
+- Card quality, score progress, blind clear, ante complete
+- Synergy-based buy rewards (slot-scaled, ante-aware coherence decay)
+- Empty slot penalty (ante-scaled), smart sell rewards
+- Per-blind and episode-end coherence bonuses
+
+**V8 multiplayer additions:**
+| Event | Value |
+|-------|:-:|
+| PvP win | +3.0 |
+| PvP loss | -2.0 |
+| Life lost (any cause) | -1.5 |
+| Game win (opponent at 0 lives) | +20.0 base |
+| Game win "shaky" adjustment | -10.0 (winner would die to small/big next ante) |
+| Game win "strong" adjustment | +5.0 (winner would reach next PvP) |
+| Game loss (you at 0 lives) | -10.0 |
+
+The **look-ahead win evaluation** simulates the winner's next few blinds with
+greedy scripted policy. Separates "won because opponent collapsed" from "won
+because my own strategy is sustainable" — provides a cleaner gradient signal
+for which strategies actually work, not just which ones outlasted the opponent.
+
+### Self-Play Design Decisions
+
+**1. Single shared policy, not multiple networks.**
+Both players sample from the same policy. Stochastic action sampling creates
+divergence — no need for separate networks in Phase 1.
+
+**2. Temperature asymmetry (P2 at temp 1.4).**
+Without this, identical sharp distributions from V7 migration caused 74%
+draws in early V8 Run 1. Scaling P2's intent/subset/phase logits by 1.4
+flattens its distribution enough to break symmetry. P1 stays at temp 1.0
+(base policy), so P1 wins more consistently but P2 explores more.
+
+**3. Multiplayer observation from day 1.**
+Without MP state in the observation, the agent literally couldn't see its
+lives, the opponent's lives, opponent's PvP score, or whether it was on a
+PvP blind. Life-loss penalties were pure reward signal with no observable
+context. Run 3 adds 4 MP state features so the policy can make strategic
+decisions based on multiplayer context.
+
+**4. Fresh training from scratch (no V7 migration).**
+Runs 1-2 tried V7→V8 migration. Both failed. V7's sharp distributions got
+disrupted by V8's new reward signal before replacement strategies could
+emerge, producing a policy that had forgotten basic play. Run 3 trains
+from random weights — initial high entropy provides natural self-play
+divergence, and MP-aware observations are learned with proper context from
+iter 1.
+
+### V8 Run History
+
+| Run | Status | Key Finding |
+|:-:|---|---|
+| Run 1 | Killed iter 63 | Shop-skip bug: failed players never got to buy jokers, 84% games ended at ante 2 |
+| Run 2 | Killed iter 71 | V7 migration disrupted basic play (solo win rate 2.35% → 0%, 88% ante 1 deaths). Broke Green+Space lock-in successfully but lost competence. |
+| **Run 3** | **In training** | Fresh start + MP obs + all prior fixes. At iter 36: reward ~32, best ante 7, phase entropy healthy at 0.44. |
+
+### Optimizations Added for V8
+
+**Sim throughput (V6→V7→V8):**
+- V7 vectorized `_best_hand_score()`: 218 `score_hand()` calls → ~5-8 calls via priority filtering (1.5x speedup, provably lossless)
+- V7 batched inference within workers: N env-steps → 1 forward pass
+- V7 auto-positioning for Blueprint/Brainstorm/Ceremonial Dagger
+- V8 hyperthreading: 16→20 workers on 16-core CPU (+2-5%)
+- V8 ban list: 4 banned jokers excluded from shop generation
+
+**Profiling-driven decisions:**
+- Multi-env per worker tested, rejected (CPU contention > inference savings)
+- Ray RLlib tested, rejected (no Python 3.13 + Windows wheels)
+- Batched GPU inference tested, found CPU batched is actually faster for our small model (0.03ms/step CPU vs 0.05ms GPU due to kernel launch overhead)
+
+### V8 Key Files
+
+- [`balatro_sim/mp_game.py`](balatro_sim/mp_game.py) — `MultiplayerBalatro`
+  coordinator: lives, phase transitions, PvP resolution, comeback money
+- [`balatro_sim/env_mp.py`](balatro_sim/env_mp.py) — RL environment wrapping
+  two V7 envs with MP-extended observation, banned jokers, revive-to-shop
+  logic, look-ahead win evaluation
+- [`train_v8.py`](train_v8.py) — Self-play PPO training loop with temperature
+  asymmetry, batched inference across both players
+- [`results/V8_DESIGN_NOTES.md`](results/V8_DESIGN_NOTES.md) — full architecture spec
+- [`results/V8_RUN_LOG.md`](results/V8_RUN_LOG.md) — per-run journal
+- [`results/MULTIPLAYER_RULESET.md`](results/MULTIPLAYER_RULESET.md) — Standard Ranked spec from balatromp.com
+
+### Next Steps After V8 Run 3
+
+Contingent on Run 3 results:
+
+1. **Phase 2: Specialist population** — 5 policies with differentiated reward
+   shaping (Flush specialist, Pairs specialist, etc.). Current plan in
+   [V7_RUN_LOG.md V8 design section](results/V7_RUN_LOG.md).
+2. **Multiplayer-specific jokers** — implement the 10 new jokers from Standard
+   Ranked (Defensive, Skip-Off, Pacifist, etc.) if population training shows
+   promise.
+3. **Move joker action** — explicit joker reordering so Blueprint/Brainstorm
+   aren't just auto-placed but strategically positioned by the agent.
+4. **Larger network** — 2.5M params may be too small for conditional strategy.
 
 ---
 
