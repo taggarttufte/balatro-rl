@@ -489,3 +489,109 @@ exploration can't find them.
 4. **Joker positioning action** — Add explicit move_joker actions so Blueprint/Brainstorm
    can be used strategically by the agent.
 5. **Larger network** — 2.5M params might be too small for conditional strategy. Try 10M+.
+
+---
+
+## V8 Design Plan — Self-Play with Specialist Population
+
+Based on the Balatro multiplayer mod mechanics (both players on same seed, PvP blind,
+4 lives), self-play addresses the core V7 problem directly: the agent can't discover
+multi-step coordinated strategies through single-agent exploration.
+
+### Core Insight
+
+Same-seed comparison gives much stronger gradient signal than averaged rewards.
+If Agent A plays seed 42 with Green+Space and dies at ante 5, and Agent B plays
+the same seed with a Flush build and dies at ante 7, PPO gets a clear differential:
+**Flush build was strictly better on this specific game state.** Our current
+averaged-reward signal buries this information in noise.
+
+Additionally, the PvP blind mechanic favors burst scoring (single-hand max score)
+rather than long-horizon scaling. This shifts optimal strategy away from Green+Space
+(scaling) toward x-mult/Flush/specific synergy builds. Self-play might naturally
+break the lock-in.
+
+### Diversity Mechanism: Specialist Population + Hall of Fame
+
+**The collapse problem:** Two copies of the same policy with same rewards and entropy
+will move in lockstep and converge to identical strategies. Self-play without
+explicit diversity gives single-agent training with extra steps.
+
+**Solution:** Population of 5 policies with differentiated reward shaping:
+
+```
+Population composition:
+  - "Generalist"       : V6 warm start, standard V7 rewards, entropy 0.05
+  - "Flush specialist" : +2x reward for Flush hand types, entropy 0.08
+  - "Pairs specialist" : +2x reward for Pair/Two Pair/Full House, entropy 0.08
+  - "Face specialist"  : +2x reward for face_cards synergy jokers, entropy 0.08
+  - "Economy special"  : +2x reward for economy jokers, entropy 0.10
+
+Training procedure:
+  - Each iteration: all 5 policies play the same 500 seeds
+  - Per-seed advantage = policy's score - median(all policies on that seed)
+  - Every 50 iterations: save snapshots to Hall of Fame
+  - Every 100 iterations: mix in Hall of Fame opponents for comparison
+
+Why each element matters:
+  - Reward diversity: prevents collapse (specialists stay specialists)
+  - Same seeds: enables direct strategy comparison (strong gradient signal)
+  - Population median baseline: clean relative performance signal
+  - Hall of Fame: prevents catastrophic forgetting of past strategies
+  - Entropy differences: fine-grained exploration variation
+```
+
+### Distillation Step
+
+After population training, distill specialists into one general policy:
+1. Generate huge dataset of (state, action) pairs where each state records which
+   policy won on that state
+2. Train a fresh policy to imitate the winning policy's action for each state
+3. Fine-tune with standard PPO
+
+Result: a single agent that plays Flush strategy when flush jokers appear, Pair
+strategy when pair jokers appear, etc. — the **conditional strategy tree we've
+been unable to build with single-agent training**.
+
+### Implementation Phases
+
+**Phase 1: Shadow play (easier to prototype)**
+- No multiplayer mod mechanics — train 5 policies in parallel with reward variations
+- All policies see same seed set each iteration
+- Compare scores across policies for same-seed gradient signal
+- Validate that population diversity holds and specialists emerge
+- Estimated effort: 500 lines of training script changes
+
+**Phase 2: Full multiplayer sim (if Phase 1 shows promise)**
+- Implement PvP blind mechanic (both agents play same seed, compare scores)
+- Lives system (4 per player, spendable on regular or PvP blinds)
+- Shared seed state for shops (both players see same shop items)
+- Turn-taking or parallel play logic
+- Estimated effort: 200-400 lines of sim code
+
+**Phase 3: Burst specialization (if PvP breaks lock-in)**
+- Analyze what strategies emerge in PvP vs solo
+- Potentially separate policy heads for "building mode" and "PvP mode"
+- Conditional strategy activation based on current blind type
+
+### Expected Results
+
+- If PvP burst pressure shifts optimal strategy away from Green+Space: **10-20% win rate** likely
+- If PvP doesn't meaningfully shift strategy: **3-5% win rate** (modest gains from population diversity alone)
+- Primary success criterion: emergence of distinct winning strategies across population
+  (Flush builds, Pair builds, etc. each winning their share of games)
+
+### Alternative Diversity Techniques Considered
+
+| Technique | Pros | Cons |
+|-----------|------|------|
+| Hall of Fame alone | Simple, prevents forgetting | Mostly trains vs weak past selves |
+| Reward diversity | Forces specialization | Specialists may not generalize |
+| Entropy diversity | Explicit explore/exploit balance | Wastes compute on high-entropy policies |
+| Diversity regularization | Mathematical guarantee | Can produce nonsensical differences |
+| Asymmetric initialization | Free diversity | Diminishes with training time |
+
+The combination recommended above (reward diversity + Hall of Fame + population median)
+is chosen because it attacks the specific V7 failure mode: inability to explore
+multi-step strategies. Each specialist is FORCED by its reward to explore a specific
+strategy, and Hall of Fame preserves that diversity against drift.
