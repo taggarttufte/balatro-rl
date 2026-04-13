@@ -130,12 +130,33 @@ for k, n in [
 
 RARITY_WEIGHTS = {"Common": 70, "Uncommon": 20, "Rare": 8, "Legendary": 2}
 
+# Module-level joker ban list. Set by environments (e.g. MP env) to exclude
+# specific jokers from shop generation. Standard Ranked multiplayer ruleset
+# bans Chicot, Matador, Mr. Bones, Luchador (boss-blind interaction jokers).
+BANNED_JOKERS: set[str] = set()
+
+
+def set_banned_jokers(banned: set[str]):
+    """Set the global banned joker list used by shop generation."""
+    global BANNED_JOKERS
+    BANNED_JOKERS = set(banned)
+
+
+def clear_banned_jokers():
+    """Clear the banned joker list (revert to base game)."""
+    global BANNED_JOKERS
+    BANNED_JOKERS = set()
+
+
 def random_joker_key(rarity: Optional[str] = None) -> str:
     if rarity:
-        pool = [k for k, v in JOKER_CATALOGUE.items() if v["rarity"] == rarity]
+        pool = [k for k, v in JOKER_CATALOGUE.items()
+                if v["rarity"] == rarity and k not in BANNED_JOKERS]
     else:
-        keys = list(JOKER_CATALOGUE.keys())
+        keys = [k for k in JOKER_CATALOGUE.keys() if k not in BANNED_JOKERS]
         weights = [RARITY_WEIGHTS.get(JOKER_CATALOGUE[k]["rarity"], 10) for k in keys]
+        if not keys:
+            return "j_joker"
         return random.choices(keys, weights=weights, k=1)[0]
     return random.choice(pool) if pool else "j_joker"
 

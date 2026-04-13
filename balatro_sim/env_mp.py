@@ -35,6 +35,26 @@ from .env_v7 import (
     PHASE_SELECTING_HAND, PHASE_BLIND_SELECT, PHASE_SHOP, PHASE_GAME_OVER,
 )
 from .card_selection import INTENT_PLAY, INTENT_DISCARD, INTENT_USE_CONSUMABLE
+from .shop import set_banned_jokers
+
+
+# Standard Ranked multiplayer ruleset disables these jokers because they
+# interact with boss blinds (which are now PvP blinds in multiplayer):
+#   - Chicot: disables boss blind effect (irrelevant in PvP)
+#   - Matador: $8 when boss triggers (irrelevant in PvP)
+#   - Mr. Bones: prevents loss at 25% (broken in lives system)
+#   - Luchador: sell to disable boss blind (irrelevant in PvP)
+MULTIPLAYER_BANNED_JOKERS = {
+    "j_chicot",
+    "j_matador",
+    "j_mr_bones",
+    "j_luchador",
+}
+
+# Apply ban list at module import time so any MP env construction inherits it.
+# This is global state — if you also use single-player envs in the same process,
+# call clear_banned_jokers() before doing so.
+set_banned_jokers(MULTIPLAYER_BANNED_JOKERS)
 
 
 # V8 multiplayer-specific rewards (added on top of V7 rewards)

@@ -4,10 +4,56 @@ import pytest
 
 from balatro_sim.env_mp import (
     MultiplayerBalatroEnv,
+    MULTIPLAYER_BANNED_JOKERS,
     R_PVP_WIN, R_PVP_LOSS, R_GAME_WIN, R_GAME_LOSS, R_LIFE_LOST,
 )
+from balatro_sim.shop import random_joker_key, BANNED_JOKERS, generate_shop
 from balatro_sim.env_v7 import OBS_DIM, PHASE_SELECTING_HAND, PHASE_BLIND_SELECT
 from balatro_sim.card_selection import INTENT_PLAY, INTENT_DISCARD
+
+
+class TestBannedJokers:
+    """Multiplayer ruleset bans 4 boss-blind-interaction jokers."""
+
+    def test_banned_set_contains_expected(self):
+        assert "j_chicot" in MULTIPLAYER_BANNED_JOKERS
+        assert "j_matador" in MULTIPLAYER_BANNED_JOKERS
+        assert "j_mr_bones" in MULTIPLAYER_BANNED_JOKERS
+        assert "j_luchador" in MULTIPLAYER_BANNED_JOKERS
+        assert len(MULTIPLAYER_BANNED_JOKERS) == 4
+
+    def test_banned_jokers_active_when_mp_imported(self):
+        """Importing env_mp should activate the ban list."""
+        assert MULTIPLAYER_BANNED_JOKERS.issubset(BANNED_JOKERS)
+
+    def test_random_joker_key_excludes_banned(self):
+        """Random joker generation should never produce banned jokers."""
+        seen = set()
+        for _ in range(2000):
+            seen.add(random_joker_key())
+        for banned in MULTIPLAYER_BANNED_JOKERS:
+            assert banned not in seen, f"{banned} appeared in random joker generation"
+
+    def test_random_joker_key_with_rarity_excludes_banned(self):
+        """Rarity-restricted joker generation should also exclude banned."""
+        # Mr. Bones is Common rarity
+        common_seen = set()
+        for _ in range(1000):
+            common_seen.add(random_joker_key("Common"))
+        assert "j_mr_bones" not in common_seen
+
+    def test_shop_excludes_banned_jokers(self):
+        """Generated shops should never contain banned jokers."""
+        env = MultiplayerBalatroEnv(seed=42)
+        env.reset()
+        # Trigger many shop generations by checking many seeds
+        for seed in range(100):
+            env_test = MultiplayerBalatroEnv(seed=seed)
+            env_test.reset()
+            shop = env_test.mp.p1_game.current_shop
+            for item in shop:
+                if item.kind == "joker":
+                    assert item.key not in MULTIPLAYER_BANNED_JOKERS
 
 
 class TestReset:
