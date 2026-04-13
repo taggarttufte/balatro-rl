@@ -482,28 +482,62 @@ class BalatroV7Env(gym.Env):
     # ── Legacy step() for compatibility with gym interface ───────────────────
 
     def _best_hand_score(self, gs) -> float:
-        """Compute the best possible score from the current hand (all 1-5 card subsets)."""
+        """
+        Compute the best possible score from the current hand.
+
+        Two-phase optimization:
+          1. Cheap phase: evaluate_hand() on all 218 subsets (~50us each)
+          2. Expensive phase: score_hand() only on top candidates by hand type priority
+
+        The top hand-type candidate(s) nearly always produce the highest score because
+        base chips/mult scales steeply with hand type. We score the top 3 candidates
+        to handle edge cases where joker synergies prefer a "lower" type (e.g. a Pair
+        with matching suits for suit jokers beats a Straight with no synergy).
+        """
         import itertools
         hand = gs.hand
         if not hand:
             return 0.0
         n = min(len(hand), N_HAND_SLOTS)
-        best = 0.0
+
+        # Phase 1: evaluate all subsets, track by hand type priority
+        # candidates_by_priority[priority_idx] = list of (combo, scoring_cards, hand_type)
+        candidates_by_priority: dict[int, list] = {}
         for k in range(1, min(6, n + 1)):
             for combo in itertools.combinations(range(n), k):
                 cards = [hand[i] for i in combo]
                 try:
                     ht, sc = evaluate_hand(cards)
-                    s, _ = score_hand(
-                        scoring_cards=sc, all_cards=cards, hand_type=ht,
-                        jokers=gs.jokers, planet_levels=gs.planet_levels,
-                        hands_left=gs.hands_left, discards_left=gs.discards_left,
-                        dollars=gs.dollars, ante=gs.ante, deck_remaining=len(gs.deck),
-                    )
-                    if s > best:
-                        best = s
                 except Exception:
-                    pass
+                    continue
+                priority = HAND_PRIORITY.get(ht, 0)
+                candidates_by_priority.setdefault(priority, []).append((combo, sc, ht, cards))
+
+        if not candidates_by_priority:
+            return 0.0
+
+        # Phase 2: score only the top candidates
+        # Take up to 3 priority tiers from the top, and cap total at 8 combos
+        sorted_priorities = sorted(candidates_by_priority.keys(), reverse=True)
+        candidates_to_score = []
+        for priority in sorted_priorities[:3]:
+            candidates_to_score.extend(candidates_by_priority[priority])
+            if len(candidates_to_score) >= 8:
+                break
+
+        best = 0.0
+        for combo, sc, ht, cards in candidates_to_score[:8]:
+            try:
+                s, _ = score_hand(
+                    scoring_cards=sc, all_cards=cards, hand_type=ht,
+                    jokers=gs.jokers, planet_levels=gs.planet_levels,
+                    hands_left=gs.hands_left, discards_left=gs.discards_left,
+                    dollars=gs.dollars, ante=gs.ante, deck_remaining=len(gs.deck),
+                )
+                if s > best:
+                    best = s
+            except Exception:
+                pass
         return best
 
     def step(self, action: int):
