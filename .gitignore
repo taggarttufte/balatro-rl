@@ -18,9 +18,15 @@ checkpoints/
 checkpoints_v3/
 checkpoints_sim/
 checkpoints_v5/
+checkpoints_v7/
+checkpoints_v7_run*/
 logs_sim/
+logs_v7/
 *.log
 *.bundle
+
+# Agent workspace
+.claude/
 
 # Keep plot scripts but not generated PNGs
 *.png

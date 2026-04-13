@@ -2,7 +2,7 @@
 
 A reinforcement learning agent that learns to play [Balatro](https://www.playbalatro.com/) using PPO.
 
-Six versions over four months: from a Lua mod with file-based IPC, through socket parallelism and a failed dual-agent experiment, to a complete Python simulation with a single-agent PPO reaching **1.9% win rate** on random seeds with a fully audited simulator. V7 (strategic card selection) is next.
+Seven versions over five months: from a Lua mod with file-based IPC, through socket parallelism, a failed dual-agent experiment, a complete Python simulation (V6: 1.9% win rate), and a hierarchical intent + learned card selection architecture (V7: 2.35% win rate after 6 reward tuning runs). Six distinct V7 runs explored reward shaping to push past the 2% plateau — the agent learned strategic card play from scratch but couldn't break the Green+Space joker lock-in.
 
 > **Disclaimer:** Balatro is a product of LocalThunk/Playstack. This is an unofficial project for research and educational purposes only.
 
@@ -36,8 +36,9 @@ A skilled human wins ~70% of runs. Random play wins <0.01%.
 | V3 | Socket IPC, custom PPO | 8 Balatro instances | <0.01% | RAM degradation kills live-game training |
 | V4 | Python sim, single agent | 16 workers | inflated* | Sim works, combo ranking helps enormously |
 | V5 | Python sim, dual agent | 16 workers | 0% | Shop starvation is structural -- failed after 12 runs |
-| **V6** | **Python sim, single agent** | **16 workers** | **1.9%** | **Sim audit + heuristic rewards, combo ranker is the ceiling** |
-| V7 | TBD | TBD | Target: 30% | Strategic card selection + long-horizon planning |
+| V6 | Python sim, single agent | 16 workers | 1.9% | Sim audit + heuristic rewards, combo ranker is the ceiling |
+| **V7** | **Hierarchical intent + learned card selection** | **16 workers** | **2.35%** | **Agent can learn card play from reward, but shop strategy plateaus at ~2%** |
+| V8 | TBD | TBD | Target: 5%+ | Curriculum learning / search-guided imitation |
 
 *V4 produced 35k+ wins across 6 training runs, but all results were inflated by two issues discovered later in V6: (1) fixed seeds caused memorization (agent won on ~16k unique seeds out of 2^31 possible), and (2) the Burglar joker was incorrectly implemented as a scaling mult engine (+3 mult/hand, accumulating permanently) instead of a hand modifier (+3 hands, -3 discards). The agent's dominant strategy (Burglar + Green Joker + Space Joker producing 612M chip Pairs) was entirely a training artifact. **V6 Run 6 (1.9% win rate) is the first legitimate measurement** -- random seeds, fully audited sim, no broken jokers.
 
@@ -238,12 +239,16 @@ Test suite: **504 tests passing** across joker behavior, scoring, boss blinds, g
 
 ```
 balatro-rl/
-├── train_sim.py              # V6 training -- single-agent PPO (current)
+├── train_v7.py               # V7 training -- hierarchical intent + learned card selection (current)
+├── train_sim.py              # V6 training -- single-agent PPO with pre-ranked combos
 ├── train_v5.py               # V5 training -- dual-agent PPO (deprecated)
 ├── balatro_sim/              # Python Balatro simulation
 │   ├── game.py               # Full game loop (BalatroGame)
+│   ├── env_v7.py             # V7 environment (434 obs, hierarchical actions)
 │   ├── env_sim.py            # V6 environment (402 obs, 46 actions)
 │   ├── env_v5.py             # V5 dual-agent env (deprecated)
+│   ├── card_selection.py     # V7: subset enumeration, intent-to-action translation
+│   ├── synergy.py            # V7: 164 jokers tagged, coherence scoring, auto-positioning
 │   ├── scoring.py            # Chip/mult scoring engine
 │   ├── hand_eval.py          # Hand type evaluation (12 types)
 │   ├── consumables.py        # Planets, tarots, spectrals, vouchers
@@ -255,21 +260,29 @@ balatro-rl/
 │       ├── base.py, chips.py, mult.py, scaling.py
 │       ├── hand_type.py, economy.py, misc.py
 │       └── tests/            # Joker unit tests
-├── tests/                    # Integration tests (504 total passing)
+├── tests/                    # Integration tests
+│   ├── test_env_v7.py        # V7 environment + hierarchical action tests
+│   ├── test_card_selection.py # Subset enumeration, boss validation
+│   └── test_*.py             # Joker + game flow tests (504 total passing)
 ├── scripts/                  # Plotting and analysis
 │   ├── training_report.py    # Training dashboard
 │   ├── plot_runs.py          # Multi-run comparison
 │   └── plot_v5_run8.py, plot_v4.py, plot_training.py
 ├── results/                  # Design notes and run logs
-│   ├── V7_PLANNING.md        # V7 architecture design (strategic card selection)
+│   ├── V7_PLANNING.md        # V7 architecture design (5 approaches analyzed)
+│   ├── V7_RUN_LOG.md         # V7 training runs (6 runs, final 2.35% win rate)
 │   ├── V6_DESIGN_NOTES.md    # V6 design and changes from V4
 │   ├── V6_RUN_LOG.md         # V6 training run journal (6 runs)
 │   ├── V5_DESIGN_NOTES.md    # V5 dual-agent spec (for reference)
 │   ├── V5_RUN_LOG.md         # V5 training runs (12 runs, all failed)
 │   └── V4_DESIGN_NOTES.md, V3_DESIGN_NOTES.md, V1/V2 results
+├── checkpoints_v7/           # V7 active model weights + episode logs
+├── checkpoints_v7_run4/      # V7 Run 4 checkpoints (2.35% peak)
+├── checkpoints_v7_run5/      # V7 Run 5 checkpoints (slot filling peak)
 ├── checkpoints_sim/          # V6 model weights + episode logs
 ├── checkpoints_v5/           # V5 model weights (deprecated)
-├── logs_sim/                 # Training logs, highlight episodes
+├── logs_v7/                  # V7 training logs
+├── logs_sim/                 # V6 training logs, highlight episodes
 ├── legacy/                   # V1-V3 training scripts and tests
 ├── launch/                   # PowerShell scripts (V3 instance management)
 ├── mod/, mod_v2/             # Lua mod files (V1-V3)
@@ -288,17 +301,24 @@ pip install torch numpy gymnasium
 ```
 
 ```bash
-# Run tests (504 passing)
+# Run tests
 python -m pytest balatro_sim/jokers/tests/ tests/ -v
 
-# Train V6 (single agent, default: 16 workers, 32k batch, 1000 iters)
+# Train V7 (current, hierarchical intent + learned card selection)
+python train_v7.py --workers 16 --steps-per-worker 2048 --iterations 1000
+
+# Train V7 with V6 weight migration (warm start)
+python train_v7.py --workers 16 --steps-per-worker 2048 --iterations 1000 \
+    --migrate-v6 checkpoints_sim/iter_0280.pt
+
+# Train V6 (pre-ranked combos)
 python train_sim.py --workers 16 --steps-per-worker 2048 --iterations 1000
 
-# Smaller batch for testing
-python train_sim.py --workers 4 --steps-per-worker 256 --iterations 100
+# Smaller batch for smoke testing
+python train_v7.py --workers 4 --steps-per-worker 256 --iterations 10
 
-# Resume from checkpoint
-python train_sim.py --resume checkpoints_sim/iter_0100.pt
+# Resume from V7 checkpoint
+python train_v7.py --resume checkpoints_v7/iter_0200.pt
 
 # Benchmark sim throughput
 python -m balatro_sim.env_sim
@@ -306,18 +326,122 @@ python -m balatro_sim.env_sim
 
 ---
 
-## Next: V7 -- Strategic Card Selection
+## V7 — Hierarchical Intent + Learned Card Selection
 
-The 2% ceiling exists because the combo ranker automates card selection. The agent picks from pre-ranked combos and converges to "always play action 0." It can't discard strategically, can't play "just enough," and can't adapt to joker synergies.
+V6's ceiling was structural: a pre-ranked combo action space meant the agent always
+picked "action 0" (best combo). V7 replaced this with a two-level decision trained
+end-to-end via PPO.
 
-**Planned approach: Hierarchical Intent + Card Selection (Approach E)**
+### Architecture
 
-1. **Strategic intent** (discrete action): "play for score", "discard to improve hand", "play just enough to clear blind", "discard to thin deck"
-2. **Card selection** (learned scoring head): given the intent, score each card and select the optimal subset
+```
+Input (434 dims) -> Embed(512) -> 4x ResBlock(512) -> trunk (512)
 
-This separates strategy (when to be greedy vs conservative) from tactics (which cards to play). See [V7 Planning](results/V7_PLANNING.md) for full analysis of 5 approaches considered.
+SELECTING_HAND (new hierarchical):
+  trunk -> intent_head(3)                    -> intent logits
+  trunk + intent_embed(32) -> card_head(8)   -> card scores (sigmoid)
+  card_scores -> enumerate 218 subsets -> softmax -> Categorical -> sample
 
-**Target: 30% win rate.**
+Other phases:
+  trunk -> phase_head(17)                    -> blind/shop actions
+
+Shared:
+  trunk -> critic(1)                         -> value
+
+~2.5M params (vs V6's 2.3M)
+```
+
+The **intent head** picks PLAY / DISCARD / USE_CONSUMABLE. The **card scoring head**
+outputs 8 scores (one per card slot) conditioned on the intent. These scores define a
+probability distribution over the 218 possible card subsets (1-5 cards from the 8-card
+hand), and a specific subset is sampled. The factored log_prob (intent + subset) feeds
+standard PPO.
+
+### Observation Space Changes (V6 -> V7)
+
+Added 4 features per card slot (32 new dims total, 402 -> 434):
+- `suit_match_count` — other hand cards sharing this suit
+- `rank_match_count` — other hand cards sharing this rank
+- `straight_connectivity` — cards within ±4 rank distance
+- `card_chip_value` — normalized base chip contribution
+
+### V7 Run History
+
+Six training runs explored reward shaping to push past the 2% win rate plateau:
+
+| Run | Win Rate | Avg Jokers | Coherence | Key Change |
+|:-:|:-:|:-:|:-:|---|
+| Run 1 | 0.0007% | — | — | Initial V7: no card quality reward — agent couldn't learn card selection |
+| Run 2 | 1.98% | 2.3 | 0.50 | Added card quality reward (played_score / best_possible_score) |
+| Run 3 | 1.80% | 2.0 | 0.62 | Synergy-based shop rewards — too weak to break Green+Space lock-in |
+| Run 4 | **2.35%** | 4.0 | 0.65 | Slot-scaled synergy + ante-scaled empty slot penalty |
+| Run 5 | 2.20% | 4.90 | 0.63 | Auto-position Blueprint/Brainstorm/Ceremonial + smart sell rewards |
+| Run 6 | 2.23% | 3.33 | 0.58 | Amplified coherence rewards BACKFIRED (agent gamed penalties) |
+
+**V7 peak: 2.35% (Run 4 last 50 iters)**. See [V7 Run Log](results/V7_RUN_LOG.md) for
+per-run details.
+
+### V7 Learnings
+
+**What the agent learned:**
+- Play good hands (card quality reward → avg ~0.8 hand quality)
+- Use discards strategically (28-32% of SELECTING_HAND actions, vs 0% in V6)
+- Fill joker slots when pressured (96% full loadouts in Run 5)
+- Maintain some coherence in buys (0.58-0.65)
+
+**What the agent didn't learn:**
+- Conditional strategy (Flush build vs Pair build vs Straight build)
+- Long-horizon joker planning (multi-purchase coordinated strategies)
+- When to deviate from Green+Space based on shop availability
+- Positional joker use (Blueprint/Brainstorm appear in <4% of wins despite auto-positioning)
+
+**Key insight from Run 6 (coherence paradox):**
+Amplifying coherence rewards caused the agent to buy FEWER jokers, not more coherent ones.
+Strong penalties for sub-coherent buys created a perverse incentive: doing less to get
+penalized less. The agent defaulted to Green+Space only (both universal, no strategy tag,
+always neutral 0.5 coherence) and collected baseline rewards safely. This is a fundamental
+limitation of reward shaping with PPO: local optima are sticky.
+
+### Architecture Also Built During V7
+
+- [`balatro_sim/card_selection.py`](balatro_sim/card_selection.py) — Subset enumeration
+  (cached by hand size), subset logit computation, boss blind validation
+- [`balatro_sim/synergy.py`](balatro_sim/synergy.py) — 164 jokers tagged by strategy
+  (hand type, suit, mechanic), coherence scoring, ante-aware decay, auto-positioning
+- [`balatro_sim/env_v7.py`](balatro_sim/env_v7.py) — V7 environment with hierarchical
+  action handling and evolved reward structure
+- [`train_v7.py`](train_v7.py) — PPO with factored log_prob (intent + subset) and
+  vectorized subset logit reconstruction for the PPO update
+
+### Why V7 Plateaued
+
+After 6 runs of reward shaping, win rate consistently lands at 2.0-2.35%. The ceiling is
+structural, not a reward tuning issue:
+
+1. **Green+Space are legitimately S-tier** in Balatro, like Blueprint/Brainstorm.
+   Expert players always buy them. The agent picking them up isn't wrong.
+2. **The agent has only ONE decision branch** — "if I see Green/Space, buy them."
+   It lacks backup branches for "commit to Flush build when flush jokers appear" or
+   "reroll when shop has no strategy-coherent options."
+3. **PPO can't discover multi-step coordinated strategies** from reward signal alone.
+   Flush builds need 3-4 flush jokers across multiple shops; single-step exploration
+   never finds the coordinated path.
+4. **Local optimum lock-in** — once the agent converges to Green+Space, every reward
+   tweak creates a new local optimum around that strategy.
+
+### Next Steps (V8)
+
+Options for breaking the 2% plateau:
+
+1. **Curriculum learning** — Train without Green+Space for first 500k steps to force
+   learning alternatives, then re-enable. Most promising given V7 findings.
+2. **Search-guided imitation** — Monte Carlo search to find winning strategies per game,
+   supervise the policy on those decisions. Proven technique from AlphaGo.
+3. **Population-based training** — Multiple agents with different reward weights,
+   periodic selection and crossover.
+4. **Larger network** — 2.5M params may be too small for conditional strategy. Try 10M+.
+5. **Add move_joker action** — Explicit joker reordering so Blueprint/Brainstorm can be
+   used strategically by the agent, not just auto-placed.
 
 ---
 

@@ -112,7 +112,31 @@ JOKER_REGISTRY["j_shortcut"] = _Shortcut()
 
 # ════════════════════════════════════════════════════════════════════════════
 # BLUEPRINT / BRAINSTORM — copy adjacent joker effects
+# Recursion guard prevents infinite loop when Blueprint copies Brainstorm
+# which copies Blueprint (or vice versa).
 # ════════════════════════════════════════════════════════════════════════════
+
+_copy_depth = 0
+_MAX_COPY_DEPTH = 3
+
+
+def _guarded_call(method_name, target, ctx, card=None):
+    """Call a joker effect method with recursion depth guard."""
+    global _copy_depth
+    if _copy_depth >= _MAX_COPY_DEPTH:
+        return
+    effect = JOKER_REGISTRY.get(target.key)
+    if effect and hasattr(effect, method_name):
+        _copy_depth += 1
+        try:
+            fn = getattr(effect, method_name)
+            if card is not None:
+                fn(target, card, ctx)
+            else:
+                fn(target, ctx)
+        finally:
+            _copy_depth -= 1
+
 
 class _Blueprint:
     """Copies the effect of the joker immediately to the right."""
@@ -124,24 +148,15 @@ class _Blueprint:
 
     def pre_score(self, inst, ctx):
         target = self._get_copy_target(inst, ctx)
-        if target:
-            effect = JOKER_REGISTRY.get(target.key)
-            if effect and hasattr(effect, "pre_score"):
-                effect.pre_score(target, ctx)
+        if target: _guarded_call("pre_score", target, ctx)
 
     def on_score_card(self, inst, card, ctx):
         target = self._get_copy_target(inst, ctx)
-        if target:
-            effect = JOKER_REGISTRY.get(target.key)
-            if effect and hasattr(effect, "on_score_card"):
-                effect.on_score_card(target, card, ctx)
+        if target: _guarded_call("on_score_card", target, ctx, card)
 
     def on_hand_scored(self, inst, ctx):
         target = self._get_copy_target(inst, ctx)
-        if target:
-            effect = JOKER_REGISTRY.get(target.key)
-            if effect and hasattr(effect, "on_hand_scored"):
-                effect.on_hand_scored(target, ctx)
+        if target: _guarded_call("on_hand_scored", target, ctx)
 
 JOKER_REGISTRY["j_blueprint"] = _Blueprint()
 
@@ -155,24 +170,15 @@ class _Brainstorm:
 
     def pre_score(self, inst, ctx):
         target = self._get_copy_target(inst, ctx)
-        if target:
-            effect = JOKER_REGISTRY.get(target.key)
-            if effect and hasattr(effect, "pre_score"):
-                effect.pre_score(target, ctx)
+        if target: _guarded_call("pre_score", target, ctx)
 
     def on_score_card(self, inst, card, ctx):
         target = self._get_copy_target(inst, ctx)
-        if target:
-            effect = JOKER_REGISTRY.get(target.key)
-            if effect and hasattr(effect, "on_score_card"):
-                effect.on_score_card(target, card, ctx)
+        if target: _guarded_call("on_score_card", target, ctx, card)
 
     def on_hand_scored(self, inst, ctx):
         target = self._get_copy_target(inst, ctx)
-        if target:
-            effect = JOKER_REGISTRY.get(target.key)
-            if effect and hasattr(effect, "on_hand_scored"):
-                effect.on_hand_scored(target, ctx)
+        if target: _guarded_call("on_hand_scored", target, ctx)
 
 JOKER_REGISTRY["j_brainstorm"] = _Brainstorm()
 
