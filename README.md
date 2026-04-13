@@ -230,6 +230,18 @@ See [V8_RUN_LOG.md](results/V8_RUN_LOG.md) for detailed per-run journal.
 
 Each version below has detailed design notes + run logs in [`results/`](results/).
 
+### V1–V4 — Live Game to Python Sim
+
+- **V1-V3:** Trained against live Balatro via Lua mod (file IPC → socket IPC). RAM degradation at 8 parallel instances killed long runs. Peak ~14 sps.
+- **V4:** Pivoted to pure Python simulation. ~1000 sps (50,000x vs V1). All subsequent versions build on this sim.
+- **V4 win rates were inflated** by fixed seeds (memorization) and a broken Burglar joker implementation, discovered later in V6.
+
+### V5 — Dual-Agent Failure ([design](results/V5_DESIGN_NOTES.md) · [runs](results/V5_RUN_LOG.md))
+
+- **Architecture:** Split play + shop into separate networks with 32-dim communication vector
+- **Result:** 0% win rate, 12 failed runs
+- **Why it failed:** Shop starvation — the shop agent received <0.1% of training steps. Every fix for shop exposure degraded play. Dual-agent is the wrong abstraction when play/shop ratio is 20:1.
+
 ### V6 — Audited Python Sim + Single Agent ([design](results/V6_DESIGN_NOTES.md) · [runs](results/V6_RUN_LOG.md))
 
 - **Architecture:** Single-agent PPO, 402-dim obs, Discrete(46) action (20 pre-ranked combos, 8 discards, shop/blind actions)
@@ -254,17 +266,6 @@ Each version below has detailed design notes + run logs in [`results/`](results/
 - **What the agent learned:** Strategic card play, discard timing (~30% of actions), slot filling (96% full loadouts)
 - **What it didn't learn:** Conditional strategy, multi-step joker planning, deviation from Green+Space
 - **Why it plateaued:** Green+Space are legitimately S-tier. The agent's only decision branch was "buy them if seen" — no backup for alternative strategies. PPO averaged rewards across games couldn't discover multi-step coordinated builds.
-
-### V5 — Dual-Agent Failure ([design](results/V5_DESIGN_NOTES.md) · [runs](results/V5_RUN_LOG.md))
-
-- **Architecture:** Split play + shop into separate networks with 32-dim communication vector
-- **Result:** 0% win rate, 12 failed runs
-- **Why it failed:** Shop starvation — the shop agent received <0.1% of training steps. Every fix for shop exposure degraded play. Dual-agent is the wrong abstraction when play/shop ratio is 20:1.
-
-### V1–V4 — Live Game to Python Sim
-
-- **V1-V3:** Trained against live Balatro via Lua mod (file IPC → socket IPC). RAM degradation at 8 parallel instances killed long runs. Peak ~14 sps.
-- **V4:** Pivoted to pure Python simulation. ~1000 sps (50,000x vs V1). All subsequent versions build on this sim.
 
 ---
 
