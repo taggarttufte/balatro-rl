@@ -47,7 +47,44 @@ Killed at iter 63 to fix both issues for Run 2.
 
 ---
 
-## Run 2 — Shop Fix + Temperature Asymmetry + Look-Ahead (planned)
+## Run 3 — Extended Observation for Multiplayer State (planned)
+
+**Motivation:** Identified during Run 2 that the agent's observation has NO
+multiplayer state. It sees its own game (V7 encoding: ante, hand, jokers,
+shop, etc.) but doesn't know:
+- Its own lives remaining
+- Opponent's lives remaining
+- Opponent's PvP score
+- Whether current blind is PvP or regular
+
+This means life loss penalties (-1.5) and PvP outcomes feed only through
+the reward signal, not through observable state. The agent can't:
+- Play conservatively when at 1 life
+- Play aggressively when opponent is at 1 life
+- Know how much to score on PvP to win
+
+**Planned observation additions (OBS_DIM: 434 → 438):**
+
+| Feature | Encoding |
+|---------|----------|
+| self_lives | self_lives / 4.0 |
+| opponent_lives | opponent_lives / 4.0 |
+| opponent_pvp_score_ratio | opponent_score / own_target (capped at 2.0, 0 if not PvP) |
+| is_pvp_blind | 1.0 if current blind is boss/PvP, else 0.0 |
+
+**Consequences:**
+- Cannot migrate V7 weights (obs shape differs) — fresh training required
+- Training time: ~9-10 hours for 1000 iters from scratch
+- First ~100 iters will be chaotic (random play), but same-seed self-play +
+  high entropy should make learning faster than V7's original from-scratch run
+
+**Decision criteria:** If Run 2 plateaus at solo-like 2% win rate, that's
+strong evidence the agent needs multiplayer awareness to learn multiplayer
+strategies. Run 3 will add the 4 observation features and start fresh.
+
+---
+
+## Run 2 — Shop Fix + Temperature Asymmetry + Look-Ahead
 
 **Three changes from Run 1:**
 
