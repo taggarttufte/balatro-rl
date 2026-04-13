@@ -66,6 +66,12 @@ CKPT_DIR = Path("checkpoints_v8")
 LOG_DIR.mkdir(exist_ok=True)
 CKPT_DIR.mkdir(exist_ok=True)
 
+# V8 Run 2: temperature asymmetry between players
+# P1 samples at temperature 1.0 (base policy)
+# P2 samples at higher temperature → flatter distribution → more exploration
+# Breaks symmetry between two copies of the same policy to reduce draw rate.
+P2_TEMPERATURE = 1.4
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Weight migration from V7
@@ -168,8 +174,19 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                 hand_mask_t = torch.from_numpy(hand_masks_np).bool()
                 hand_trunk = trunk[hand_indices]
 
+                # Build per-agent temperature vector (P2 gets higher temp)
+                hand_temps = np.array([
+                    P2_TEMPERATURE if agent_meta[i][1] == 2 else 1.0
+                    for i in hand_indices
+                ], dtype=np.float32)
+                hand_temps_t = torch.from_numpy(hand_temps).float().unsqueeze(1)
+
                 with torch.no_grad():
-                    intent_dist = policy.forward_intent(hand_trunk, hand_mask_t)
+                    # Get raw logits, apply per-agent temperature, then sample
+                    intent_logits = policy.intent_head(hand_trunk)
+                    intent_logits = intent_logits.masked_fill(~hand_mask_t, float("-inf"))
+                    scaled_logits = intent_logits / hand_temps_t
+                    intent_dist = torch.distributions.Categorical(logits=scaled_logits)
                     intents_t = intent_dist.sample()
                     intent_lp = intent_dist.log_prob(intents_t).cpu().numpy()
                     intents_np = intents_t.cpu().numpy()
@@ -184,12 +201,14 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                     n_cards = min(len(game.hand), N_HAND_SLOTS)
                     log_prob = float(intent_lp[j])
                     subset_idx = 0
+                    # Per-player temperature for subset sampling too
+                    temp = P2_TEMPERATURE if player == 2 else 1.0
 
                     if intent_val in (INTENT_PLAY, INTENT_DISCARD) and n_cards > 0:
                         subsets = enumerate_subsets(n_cards)
                         cs = card_scores_np[j, :n_cards]
                         subset_logits = compute_subset_logits(cs, subsets, intent_val)
-                        sl_t = torch.from_numpy(subset_logits).float()
+                        sl_t = torch.from_numpy(subset_logits).float() / temp
                         sub_dist = torch.distributions.Categorical(logits=sl_t)
                         si_t = sub_dist.sample()
                         subset_idx = int(si_t.item())
@@ -214,8 +233,18 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                 phase_mask_t = torch.from_numpy(phase_masks_np).bool()
                 phase_trunk = trunk[phase_indices]
 
+                # Per-agent temperature (P2 gets higher temp)
+                phase_temps = np.array([
+                    P2_TEMPERATURE if agent_meta[i][1] == 2 else 1.0
+                    for i in phase_indices
+                ], dtype=np.float32)
+                phase_temps_t = torch.from_numpy(phase_temps).float().unsqueeze(1)
+
                 with torch.no_grad():
-                    phase_dist = policy.forward_phase(phase_trunk, phase_mask_t)
+                    phase_logits = policy.phase_head(phase_trunk)
+                    phase_logits = phase_logits.masked_fill(~phase_mask_t, float("-inf"))
+                    scaled_phase_logits = phase_logits / phase_temps_t
+                    phase_dist = torch.distributions.Categorical(logits=scaled_phase_logits)
                     actions_t = phase_dist.sample()
                     phase_lp = phase_dist.log_prob(actions_t).cpu().numpy()
                     actions_np = actions_t.cpu().numpy()

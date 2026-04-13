@@ -64,6 +64,13 @@ R_GAME_WIN    = 20.0   # opponent hit 0 lives before you
 R_GAME_LOSS   = -10.0  # you hit 0 lives first
 R_LIFE_LOST   = -1.5   # penalty each time a life is lost (both players)
 
+# V8 Run 2: look-ahead adjustment for game win.
+# When the game ends because opponent hit 0 lives, check if the winner would
+# have survived their next blind. This separates "won because opponent was bad"
+# from "won because my own strategy was solid."
+R_WIN_SHAKY   = -10.0  # penalty applied to R_GAME_WIN if winner would have died next blind
+R_WIN_STRONG  = +5.0   # bonus applied to R_GAME_WIN if winner would have reached next PvP
+
 
 class _PlayerEnvProxy:
     """
@@ -141,6 +148,10 @@ class MultiplayerBalatroEnv:
         self.p1.auto_advance()
         self.p2.auto_advance()
         self._episode_reward = [0.0, 0.0]
+        # Track last resolved (ante, blind_idx) per player to avoid double-resolving
+        # the same blind when both players are lingering in SHOP post-resolution.
+        self._last_resolved_p1 = (-1, -1)
+        self._last_resolved_p2 = (-1, -1)
         return self.p1.encode_obs(), self.p2.encode_obs()
 
     # ─────────────────────────────────────────────────────────────────────
@@ -225,10 +236,15 @@ class MultiplayerBalatroEnv:
         p1, p2 = self.mp.p1_game, self.mp.p2_game
 
         # Only resolve if both players are "done" with the current blind
-        p1_done = self._is_blind_done(p1)
-        p2_done = self._is_blind_done(p2)
+        p1_done = self._is_blind_done(p1, self._last_resolved_p1)
+        p2_done = self._is_blind_done(p2, self._last_resolved_p2)
         if not (p1_done and p2_done):
             return (0.0, 0.0)
+
+        # Record the resolution positions so we don't double-resolve the same
+        # SHOP state while players decide their shop actions.
+        self._last_resolved_p1 = (p1.ante, p1.blind_idx)
+        self._last_resolved_p2 = (p2.ante, p2.blind_idx)
 
         p1_reward = 0.0
         p2_reward = 0.0
@@ -275,18 +291,86 @@ class MultiplayerBalatroEnv:
             if not self.mp.game_over:
                 self.mp.advance_to_next_ante()
 
-        # Game-over bonus
+        # Game-over bonus with look-ahead adjustment
         if self.mp.game_over:
             winner = self.mp.winner
-            if winner == 1:
-                p1_reward += R_GAME_WIN
-                p2_reward += R_GAME_LOSS
-            elif winner == 2:
-                p2_reward += R_GAME_WIN
-                p1_reward += R_GAME_LOSS
+            if winner in (1, 2):
+                winner_game = self.mp.get_player_game(winner)
+                lookahead = self._lookahead_winner_survival(winner_game)
+                base_win = R_GAME_WIN
+                if lookahead == "shaky":
+                    base_win += R_WIN_SHAKY
+                elif lookahead == "strong":
+                    base_win += R_WIN_STRONG
+                if winner == 1:
+                    p1_reward += base_win
+                    p2_reward += R_GAME_LOSS
+                else:
+                    p2_reward += base_win
+                    p1_reward += R_GAME_LOSS
             # Draw: no bonus
 
         return (p1_reward, p2_reward)
+
+    def _lookahead_winner_survival(self, winner_game) -> str:
+        """
+        Run winner forward with a scripted greedy policy to see if they'd
+        actually survive after the opponent died.
+
+        Returns:
+          'shaky'   — winner dies to small/big blind in next ante
+          'strong'  — winner makes it to the next PvP (boss blind) intact
+          'unknown' — winner was already game-over when called (e.g. both hit 0
+                      lives same round), or simulation didn't progress far enough
+        """
+        if winner_game.state == State.GAME_OVER:
+            return "unknown"
+
+        # Remember starting ante so we can detect "reached next PvP"
+        starting_ante = winner_game.ante
+        starting_blind_idx = winner_game.blind_idx
+
+        # Simulate up to 150 steps (should be enough for 2-3 blinds worth)
+        max_steps = 150
+        for _ in range(max_steps):
+            state = winner_game.state
+            if state == State.GAME_OVER:
+                return "shaky"
+            # Check success condition: reached next PvP blind in SELECTING_HAND
+            # (if we advanced past starting position AND now at boss blind)
+            reached_boss = (
+                winner_game.current_blind is not None
+                and winner_game.current_blind.is_boss
+                and winner_game.state in (State.BLIND_SELECT, State.SELECTING_HAND)
+                and (winner_game.ante, winner_game.blind_idx) != (starting_ante, starting_blind_idx)
+            )
+            if reached_boss:
+                return "strong"
+
+            # Scripted greedy step
+            try:
+                if state == State.BLIND_SELECT:
+                    winner_game.step({"type": "play_blind"})
+                elif state == State.SELECTING_HAND:
+                    if not winner_game.hand:
+                        break
+                    n = min(5, len(winner_game.hand))
+                    winner_game.step({"type": "play", "cards": list(range(n))})
+                elif state == State.SHOP:
+                    winner_game.step({"type": "leave_shop"})
+                elif state == State.ROUND_EVAL:
+                    winner_game.step({"type": "noop"})
+                elif state == State.BOOSTER_OPEN:
+                    if winner_game.booster_choices:
+                        winner_game.step({"type": "pick_booster", "indices": [0]})
+                    else:
+                        winner_game.step({"type": "skip_booster"})
+                else:
+                    break
+            except Exception:
+                return "unknown"
+
+        return "unknown"
 
     def _resolve_pre_pvp_blind(self, p1_cleared: bool, p2_cleared: bool, is_small: bool):
         """
@@ -311,48 +395,50 @@ class MultiplayerBalatroEnv:
     def _revive_if_needed(self, game, cleared: bool):
         """
         If a player's game thinks it's GAME_OVER but they still have lives,
-        reset the game state to continue to next blind.
+        send them to the SHOP (as if they'd cleared but without clear bonus).
 
-        This is a hack — BalatroGame doesn't know about lives. We force-advance
-        it to the next blind as if they'd cleared, but without awarding points
-        or money for clearing.
+        Fixed behavior: failed players now get to visit the shop before their
+        next blind. Without this, they never get to buy jokers and can never
+        recover, causing games to end at ante 2 in ~84% of cases.
+
+        What they DON'T get on failure (vs clearing):
+          - Blind clear money payout (interest, hands-left bonus)
+          - Blind clear reward (handled in _finish_step)
+        What they DO get:
+          - Shop visit with all regular shop mechanics
+          - Natural advancement through ROUND_EVAL -> SHOP when leaving
         """
         if cleared:
             return  # game naturally advanced to SHOP
         if game.state != State.GAME_OVER:
             return
-        # Force progression: set state back to BLIND_SELECT and advance blind_idx
-        from .game import BlindInfo
-        from .constants import BLIND_CHIPS
-        game.blind_idx += 1
-        if game.blind_idx >= 3:
-            # Wrapped past boss — increment ante
-            game.ante += 1
-            game.blind_idx = 0
-        # Reset blind state (like _start_blind but without the gameplay)
-        game.chips_scored = 0
-        game.hands_left = game.base_hands
-        game.discards_left = game.base_discards
-        game.hand = []
-        game.deck = []  # re-initialized on play_blind
-        game.played_hand_types_this_round = set()
-        # Set up next blind info
-        blind_kinds = ["Small", "Big", "Boss"]
-        kind = blind_kinds[game.blind_idx]
-        chips = BLIND_CHIPS.get(game.ante, (300, 450, 600))[game.blind_idx]
-        is_boss = (game.blind_idx == 2)
-        game.current_blind = BlindInfo("", kind, chips, is_boss=is_boss)
-        # Back to BLIND_SELECT
-        game.state = State.BLIND_SELECT
 
-    def _is_blind_done(self, game) -> bool:
+        from .game import BlindInfo
+        from .shop import generate_shop
+
+        # Reset to SHOP state so player can buy jokers/consumables
+        # Generate a shop for them (normally done by _end_blind)
+        game.current_shop = generate_shop(game)
+        # Reset reroll state for the new shop
+        game.reroll_discount = 0
+        game.free_rerolls_remaining = game.free_rerolls_per_round
+        # No clear payout (they failed), but they can use whatever money they have
+        game.state = State.SHOP
+
+    def _is_blind_done(self, game, last_resolved: tuple[int, int]) -> bool:
         """A player's current blind is "done" when they've scored enough, run out
-        of hands, or reached game over."""
+        of hands, or reached game over.
+
+        last_resolved: the (ante, blind_idx) that was already resolved for this
+        player. If they're still at that same position in SHOP state, we've
+        already counted them as done — wait until they move past it.
+        """
         if game.state == State.GAME_OVER:
             return True
+        current_pos = (game.ante, game.blind_idx)
         if game.state == State.SHOP:
-            # Cleared the blind
-            return True
+            # Don't re-count a SHOP state we've already resolved
+            return current_pos != last_resolved
         if game.state == State.SELECTING_HAND and game.hands_left <= 0:
             return True
         return False
