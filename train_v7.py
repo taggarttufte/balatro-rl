@@ -273,6 +273,13 @@ def compute_gae(rewards, values, dones, next_value):
 
 def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                conn: mp.connection.Connection, seed_base: int):
+    """
+    Worker process that runs n_envs in lockstep with batched inference.
+
+    Optimization (Run 5+): Instead of sequential per-env inference, we collect
+    obs from all n_envs at once, batch them, and do a SINGLE forward pass per
+    step. CPU batched inference is ~10x faster per env-step than sequential calls.
+    """
     import os, random as _random_mod
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     _rng = _random_mod.Random(seed_base + worker_id * 1000)
@@ -300,19 +307,100 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
         for _ in range(steps_per_env):
             if time.time() > deadline:
                 break
+
+            # ── Gather all envs into batched inputs ──────────────────────────
+            phases = [env.get_phase() for env in envs]
+            obs_batch = torch.from_numpy(np.stack(obs_list)).float()  # (n_envs, OBS_DIM)
+
+            # Compute trunk + value for ALL envs in one batched call
+            with torch.no_grad():
+                trunk = policy.get_trunk(obs_batch)  # (n_envs, HIDDEN)
+                values_b = policy.forward_value(trunk).cpu().numpy()  # (n_envs,)
+
+            # Split into hand vs phase indices for separate sampling
+            hand_indices = [i for i, p in enumerate(phases) if p == PHASE_SELECTING_HAND]
+            phase_indices = [i for i, p in enumerate(phases) if p != PHASE_SELECTING_HAND]
+
+            # Pre-sample for hand envs (batched)
+            hand_intents = {}     # i -> intent
+            hand_log_probs = {}   # i -> log_prob
+            hand_subset_idxs = {} # i -> subset_idx
+            hand_card_scores = {} # i -> card_scores np
+            hand_n_cards = {}     # i -> n_cards
+            hand_intent_masks = {}# i -> mask
+
+            if hand_indices:
+                # Build masks
+                hand_masks_np = np.stack([envs[i].get_intent_mask() for i in hand_indices])
+                hand_mask_t = torch.from_numpy(hand_masks_np).bool()
+                hand_trunk = trunk[hand_indices]
+
+                with torch.no_grad():
+                    intent_dist = policy.forward_intent(hand_trunk, hand_mask_t)
+                    intents_t = intent_dist.sample()
+                    intent_lp = intent_dist.log_prob(intents_t).cpu().numpy()
+                    intents_np = intents_t.cpu().numpy()
+
+                    # Card scores conditioned on sampled intent
+                    card_scores_t = policy.forward_card_scores(hand_trunk, intents_t)  # (H, 8)
+                    card_scores_np = card_scores_t.cpu().numpy()
+
+                # Per-env subset sampling (varying n_cards, can't fully batch)
+                for j, i in enumerate(hand_indices):
+                    intent_val = int(intents_np[j])
+                    n_cards = min(len(envs[i].game.hand), N_HAND_SLOTS)
+                    log_prob = float(intent_lp[j])
+                    subset_idx = 0
+
+                    if intent_val in (INTENT_PLAY, INTENT_DISCARD) and n_cards > 0:
+                        subsets = enumerate_subsets(n_cards)
+                        cs = card_scores_np[j, :n_cards]
+                        subset_logits = compute_subset_logits(cs, subsets, intent_val)
+                        sl_t = torch.from_numpy(subset_logits).float()
+                        sub_dist = torch.distributions.Categorical(logits=sl_t)
+                        si_t = sub_dist.sample()
+                        subset_idx = int(si_t.item())
+                        log_prob += float(sub_dist.log_prob(si_t).item())
+
+                    hand_intents[i] = intent_val
+                    hand_log_probs[i] = log_prob
+                    hand_subset_idxs[i] = subset_idx
+                    hand_card_scores[i] = card_scores_np[j]
+                    hand_n_cards[i] = n_cards
+                    hand_intent_masks[i] = hand_masks_np[j]
+
+            # Pre-sample for phase envs (batched)
+            phase_actions = {}    # i -> action
+            phase_log_probs = {}  # i -> log_prob
+            phase_masks_dict = {} # i -> mask
+
+            if phase_indices:
+                phase_masks_np = np.stack([envs[i].get_phase_mask() for i in phase_indices])
+                phase_mask_t = torch.from_numpy(phase_masks_np).bool()
+                phase_trunk = trunk[phase_indices]
+
+                with torch.no_grad():
+                    phase_dist = policy.forward_phase(phase_trunk, phase_mask_t)
+                    actions_t = phase_dist.sample()
+                    phase_lp = phase_dist.log_prob(actions_t).cpu().numpy()
+                    actions_np = actions_t.cpu().numpy()
+
+                for j, i in enumerate(phase_indices):
+                    phase_actions[i] = int(actions_np[j])
+                    phase_log_probs[i] = float(phase_lp[j])
+                    phase_masks_dict[i] = phase_masks_np[j]
+
+            # ── Apply actions and collect rollout records ────────────────────
             for i, env in enumerate(envs):
-                phase = env.get_phase()
-                obs_t = torch.FloatTensor(obs_list[i]).unsqueeze(0)
+                phase = phases[i]
+                value = float(values_b[i])
 
                 if phase == PHASE_SELECTING_HAND:
-                    intent_mask = env.get_intent_mask()
-                    intent_mask_t = torch.BoolTensor(intent_mask).unsqueeze(0)
-                    n_cards = min(len(env.game.hand), N_HAND_SLOTS)
+                    intent = hand_intents[i]
+                    subset_idx = hand_subset_idxs[i]
+                    log_prob = hand_log_probs[i]
+                    n_cards = hand_n_cards[i]
 
-                    intent, subset_idx, log_prob, value, card_scores = \
-                        policy.get_hand_action(obs_t, intent_mask_t, n_cards)
-
-                    # Resolve subset to card indices
                     if intent in (INTENT_PLAY, INTENT_DISCARD) and n_cards > 0:
                         subsets = enumerate_subsets(n_cards)
                         subset_idx_clamped = min(subset_idx, len(subsets) - 1)
@@ -333,16 +421,11 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                         "intent": intent,
                         "subset_idx": subset_idx,
                         "n_cards": n_cards,
-                        # For logging
-                        "intent_mask": intent_mask.copy(),
+                        "intent_mask": hand_intent_masks[i].copy(),
                     })
-
                 else:
-                    phase_mask = env.get_phase_mask()
-                    phase_mask_t = torch.BoolTensor(phase_mask).unsqueeze(0)
-
-                    action, log_prob, value = \
-                        policy.get_phase_action(obs_t, phase_mask_t)
+                    action = phase_actions[i]
+                    log_prob = phase_log_probs[i]
 
                     obs_next, reward, terminated, truncated, info = \
                         env.step_phase(action)
@@ -355,7 +438,7 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
                         "done": float(terminated or truncated),
                         "phase_id": phase,
                         "phase_action": action,
-                        "phase_mask": phase_mask.copy(),
+                        "phase_mask": phase_masks_dict[i].copy(),
                     })
 
                 done = terminated or truncated
@@ -380,11 +463,11 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
 
                 obs_list[i] = obs_next
 
-        # Bootstrap values
-        next_values = []
-        for i, env in enumerate(envs):
-            obs_t = torch.FloatTensor(obs_list[i]).unsqueeze(0)
-            next_values.append(policy.get_value(obs_t))
+        # Bootstrap values (batched)
+        with torch.no_grad():
+            obs_batch = torch.from_numpy(np.stack(obs_list)).float()
+            trunk = policy.get_trunk(obs_batch)
+            next_values = policy.forward_value(trunk).cpu().numpy().tolist()
 
         conn.send({
             "rollout": rollout,
