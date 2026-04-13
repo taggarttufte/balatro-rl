@@ -31,11 +31,21 @@ import numpy as np
 from .mp_game import MultiplayerBalatro, MPPhase
 from .game import State
 from .env_v7 import (
-    BalatroV7Env, OBS_DIM, N_PHASE_ACTIONS, N_INTENTS, N_HAND_SLOTS,
+    BalatroV7Env, OBS_DIM as V7_OBS_DIM, N_PHASE_ACTIONS, N_INTENTS, N_HAND_SLOTS,
     PHASE_SELECTING_HAND, PHASE_BLIND_SELECT, PHASE_SHOP, PHASE_GAME_OVER,
 )
 from .card_selection import INTENT_PLAY, INTENT_DISCARD, INTENT_USE_CONSUMABLE
 from .shop import set_banned_jokers
+
+
+# V8 Run 3: Extended observation with multiplayer state
+# V7 obs (434) + 4 MP features = 438 total
+#   [434] self_lives / 4.0                    — how much cushion do I have
+#   [435] opponent_lives / 4.0                — how close am I to winning
+#   [436] opponent_pvp_score_ratio            — opponent score / my target (capped 2.0), 0 if not PvP
+#   [437] is_pvp_blind                        — 1.0 if current blind is boss/PvP, else 0.0
+MP_OBS_FEATURES = 4
+OBS_DIM = V7_OBS_DIM + MP_OBS_FEATURES
 
 
 # Standard Ranked multiplayer ruleset disables these jokers because they
@@ -100,7 +110,33 @@ class _PlayerEnvProxy:
         return self._v7.game
 
     def encode_obs(self) -> np.ndarray:
-        return self._v7._encode_obs()
+        """V7 obs (434) + 4 multiplayer state features = 438 total."""
+        base = self._v7._encode_obs()
+        # Build MP extension
+        self_lives = self.mp.get_lives(self.player)
+        opp_lives = self.mp.get_lives(2 if self.player == 1 else 1)
+        opp_game = self.mp.get_player_game(2 if self.player == 1 else 1)
+        own_game = self.mp.get_player_game(self.player)
+
+        # Opponent PvP score ratio — only meaningful during PvP blind
+        is_pvp = (own_game.current_blind is not None
+                  and own_game.current_blind.is_boss)
+        if is_pvp and own_game.current_blind.chips_target > 0:
+            opp_ratio = min(
+                opp_game.chips_scored / max(own_game.current_blind.chips_target, 1),
+                2.0,
+            )
+        else:
+            opp_ratio = 0.0
+
+        mp_extension = np.array([
+            self_lives / 4.0,
+            opp_lives / 4.0,
+            opp_ratio,
+            1.0 if is_pvp else 0.0,
+        ], dtype=np.float32)
+
+        return np.concatenate([base, mp_extension])
 
     def get_intent_mask(self) -> np.ndarray:
         return self._v7.get_intent_mask()

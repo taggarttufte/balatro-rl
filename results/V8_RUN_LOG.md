@@ -117,6 +117,74 @@ strategies. Run 3 will add the 4 observation features and start fresh.
 
 **Config:** 20 workers, 1024 steps/worker, 1000 iters, V7 Run 4 migration
 
+**Status:** KILLED at iter 71 — policy got WORSE at basic play
+
+**What happened at iter 70:**
+
+Evaluating V8 iter 70 checkpoint in solo V7 env showed dramatic regression:
+- V7 Run 4 baseline: 2.35% win rate, ~20% ante 1 death rate
+- **V8 iter 70: 0% win rate, 88% ante 1 death rate**
+
+Key finding: **V7→V8 migration broke V7's competence.** Temperature asymmetry
++ new V8 rewards + gradient updates from bad MP games disrupted V7's sharp
+distributions. The policy un-learned basic play without replacing it.
+
+**The positive discovery:**
+- **Green+Space lock-in GENUINELY broken.** Green at 3% (was 47%), Space not in
+  top 15 jokers (was 51%)
+- Joker distribution flat — Arrowhead, Cartomancer, Reserved Parking,
+  Photograph, Faceless, etc. all 3-4% each
+- Most diverse joker set ever seen
+
+**Why we killed it:** The unstable transition phase wasn't recovering. In MP
+training, 68% of games ended at ante 2, avg game length 27 MP steps, both
+players burning through 4 lives in ~6-8 blind failures. No meaningful
+strategic learning emerging.
+
+**Lesson:** V7 migration is not viable for V8. The multiplayer reward signal
+disrupts V7's learned distributions before it can teach alternative strategies.
+Fresh start with multiplayer-aware observations is the right path.
+
+---
+
+## Run 3 — Extended Observation for Multiplayer State (active)
+
+**Config:** 20 workers, 1024 steps/worker, 1000 iters, FRESH START (no migration)
+
+**Key change: OBS_DIM 434 → 438**
+
+Added 4 multiplayer state features to the observation:
+
+| Index | Feature | Encoding |
+|-------|---------|----------|
+| [434] | self_lives | self_lives / 4.0 |
+| [435] | opponent_lives | opponent_lives / 4.0 |
+| [436] | opponent_pvp_score_ratio | opponent_score / own_target (capped 2.0, 0 if not PvP) |
+| [437] | is_pvp_blind | 1.0 if current blind is boss, else 0.0 |
+
+This lets the agent actually SEE the multiplayer context and make strategic
+decisions based on it:
+- Play conservatively when at 1 life
+- Play aggressively when opponent is at 1 life
+- Know exactly how much to score on PvP to win
+- Distinguish PvP blinds from regular blinds
+
+**Other changes preserved from Run 2:**
+- Shop fix (revive sends to SHOP, not next blind)
+- Temperature asymmetry (P2 samples at temp 1.4)
+- Look-ahead win evaluation (shaky/strong adjustments)
+- Double-resolution fix
+- Banned jokers (Chicot, Matador, Mr. Bones, Luchador)
+- HOUSE RULE (regular blind failures cost a life)
+
+**Training starts from scratch:**
+- Network: ActorCriticV7 with obs_dim=438, ~2.48M params
+- No V7 migration (obs shape incompatible — 434 vs 438)
+- Expected: ~100-200 iterations to match V7's basic competence, then the
+  multiplayer signal drives further learning with full context visibility
+
+**496 tests passing.**
+
 **Status:** Ready to launch
 
 ---

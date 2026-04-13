@@ -4,11 +4,11 @@ import pytest
 
 from balatro_sim.env_mp import (
     MultiplayerBalatroEnv,
-    MULTIPLAYER_BANNED_JOKERS,
+    MULTIPLAYER_BANNED_JOKERS, OBS_DIM,
     R_PVP_WIN, R_PVP_LOSS, R_GAME_WIN, R_GAME_LOSS, R_LIFE_LOST,
 )
 from balatro_sim.shop import random_joker_key, BANNED_JOKERS, generate_shop
-from balatro_sim.env_v7 import OBS_DIM, PHASE_SELECTING_HAND, PHASE_BLIND_SELECT
+from balatro_sim.env_v7 import PHASE_SELECTING_HAND, PHASE_BLIND_SELECT
 from balatro_sim.card_selection import INTENT_PLAY, INTENT_DISCARD
 
 
@@ -54,6 +54,46 @@ class TestBannedJokers:
             for item in shop:
                 if item.kind == "joker":
                     assert item.key not in MULTIPLAYER_BANNED_JOKERS
+
+
+class TestMPObsExtension:
+    """V8 Run 3: obs is extended with 4 multiplayer state features (434 → 438)."""
+
+    def test_obs_dim_is_438(self):
+        assert OBS_DIM == 438
+
+    def test_self_lives_in_obs(self):
+        env = MultiplayerBalatroEnv(seed=42, lives=4)
+        env.reset()
+        p1_obs, _ = env.p1.encode_obs(), env.p2.encode_obs()
+        assert p1_obs[434] == 1.0  # 4/4 lives
+        # After losing a life
+        env.mp.apply_blind_failure(1)
+        p1_obs = env.p1.encode_obs()
+        assert p1_obs[434] == 0.75  # 3/4 lives
+
+    def test_opponent_lives_in_obs(self):
+        env = MultiplayerBalatroEnv(seed=42, lives=4)
+        env.reset()
+        env.mp.apply_blind_failure(2)  # P2 loses a life
+        p1_obs = env.p1.encode_obs()
+        assert p1_obs[434] == 1.0      # P1 own lives full
+        assert p1_obs[435] == 0.75     # P2 lives at 3/4
+
+    def test_is_pvp_flag(self):
+        """The is_pvp flag should be 1.0 when the current blind is a boss."""
+        env = MultiplayerBalatroEnv(seed=42)
+        env.reset()
+        # Not on PvP blind initially (small blind)
+        p1_obs = env.p1.encode_obs()
+        assert p1_obs[437] == 0.0
+
+    def test_obs_has_no_nan(self):
+        env = MultiplayerBalatroEnv(seed=42)
+        env.reset()
+        p1_obs, p2_obs = env.p1.encode_obs(), env.p2.encode_obs()
+        assert not np.isnan(p1_obs).any()
+        assert not np.isnan(p2_obs).any()
 
 
 class TestReset:

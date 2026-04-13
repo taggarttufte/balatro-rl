@@ -112,23 +112,27 @@ class ActorCriticV7(nn.Module):
     V7 hierarchical actor-critic.
 
     Architecture:
-      input (434) -> embed(512) -> 4x ResBlock(512) -> trunk(512)
+      input (obs_dim) -> embed(512) -> 4x ResBlock(512) -> trunk(512)
       trunk -> intent_head(512, 3)
       trunk + intent_embed(3, 32) -> card_head(544, 256, 8, sigmoid)
       trunk -> phase_head(512, 17)
       trunk -> critic(512, 1)
 
-    ~2.5M params
+    ~2.5M params (for obs_dim=434)
+
+    obs_dim parameter added for V8 — defaults to V7's 434 for backward
+    compatibility, V8 passes 438 for extended multiplayer observation.
     """
     HIDDEN = 512
     INTENT_EMBED_DIM = 32
 
-    def __init__(self):
+    def __init__(self, obs_dim: int = OBS_DIM):
         super().__init__()
         H = self.HIDDEN
+        self.obs_dim = obs_dim
 
         # Shared trunk
-        self.embed = nn.Sequential(nn.Linear(OBS_DIM, H), nn.ReLU())
+        self.embed = nn.Sequential(nn.Linear(obs_dim, H), nn.ReLU())
         self.res_blocks = nn.Sequential(
             ResidualBlock(H), ResidualBlock(H),
             ResidualBlock(H), ResidualBlock(H),

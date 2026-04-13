@@ -38,23 +38,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from balatro_sim.env_mp import MultiplayerBalatroEnv
+from balatro_sim.env_mp import MultiplayerBalatroEnv, OBS_DIM
 from balatro_sim.env_v7 import (
-    OBS_DIM, N_PHASE_ACTIONS, N_HAND_SLOTS,
-    PHASE_SELECTING_HAND,
+    N_PHASE_ACTIONS, N_HAND_SLOTS, PHASE_SELECTING_HAND,
 )
 from balatro_sim.card_selection import (
     INTENT_PLAY, INTENT_DISCARD, INTENT_USE_CONSUMABLE, N_INTENTS,
     enumerate_subsets, compute_subset_logits,
 )
 
-# Reuse network architecture + subset mask infrastructure from V7
+# Reuse network architecture + subset mask infrastructure from V7.
+# ActorCriticV7 accepts obs_dim parameter — V8 passes MP OBS_DIM (438).
 from train_v7 import (
     ActorCriticV7, compute_gae, ppo_update,
     LR, GAMMA, LAMBDA, CLIP, ENTROPY_COEFF, VF_COEFF, GRAD_CLIP,
     N_EPOCHS, MINIBATCH_SIZE, SUBSET_TEMPERATURE,
     INTENT_ENTROPY_COEFF, SUBSET_ENTROPY_COEFF,
-    _get_subset_mask, migrate_v6_weights,
+    _get_subset_mask,
 )
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -74,16 +74,10 @@ P2_TEMPERATURE = 1.4
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Weight migration from V7
+# V7 migration removed — Run 3 uses extended obs (438) incompatible with
+# V7 checkpoints (434). V8 trains from scratch with the multiplayer-aware
+# observation from day 1.
 # ════════════════════════════════════════════════════════════════════════════
-
-def migrate_v7_weights(v7_path: str, model: ActorCriticV7):
-    """Transfer V7 weights directly (same architecture)."""
-    ckpt = torch.load(v7_path, map_location="cpu")
-    sd = ckpt.get("policy", ckpt)
-    model.load_state_dict(sd)
-    print(f"  Migrated V7 weights from {v7_path}")
-    return model
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -108,7 +102,7 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
             for _ in range(n_envs)]
     obs_pairs = [e.reset() for e in envs]  # list of (p1_obs, p2_obs)
 
-    policy = ActorCriticV7().cpu().eval()
+    policy = ActorCriticV7(obs_dim=OBS_DIM).cpu().eval()
 
     # Per-env tracking for episode logging
     ep_steps = [0] * n_envs
@@ -373,14 +367,13 @@ def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
 
 def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
           num_iterations: int, resume_path: str | None,
-          migrate_v7_path: str | None, migrate_v6_path: str | None,
           minibatch_size: int = MINIBATCH_SIZE):
 
     device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # batch_size = agent-steps per iter (each MP step produces 2 agent records)
     batch_size  = num_workers * envs_per_worker * steps_per_worker * 2
 
-    policy    = ActorCriticV7().to(device)
+    policy    = ActorCriticV7(obs_dim=OBS_DIM).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=LR, eps=1e-5)
 
     start_iter  = 0
@@ -396,14 +389,6 @@ def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
         total_steps = ckpt.get("total_steps", 0)
         best_ante   = ckpt.get("best_ante", 1)
         print(f"Resumed from {resume_path}  (iter {start_iter}, {total_steps:,} steps)")
-    elif migrate_v7_path and Path(migrate_v7_path).exists():
-        migrate_v7_weights(migrate_v7_path, policy)
-        policy = policy.to(device)
-        print(f"Migrated V7 weights from {migrate_v7_path}")
-    elif migrate_v6_path and Path(migrate_v6_path).exists():
-        migrate_v6_weights(migrate_v6_path, policy)
-        policy = policy.to(device)
-        print(f"Migrated V6 weights from {migrate_v6_path}")
 
     # Spawn workers
     seed_base = int(time.time()) % 100000
@@ -639,11 +624,8 @@ if __name__ == "__main__":
     parser.add_argument("--envs-per-worker",  type=int, default=1)
     parser.add_argument("--steps-per-worker", type=int, default=1024)
     parser.add_argument("--iterations",       type=int, default=1000)
-    parser.add_argument("--resume",           type=str, default=None)
-    parser.add_argument("--migrate-v7",       type=str, default=None,
-                        help="Path to V7 checkpoint for weight migration")
-    parser.add_argument("--migrate-v6",       type=str, default=None,
-                        help="Path to V6 checkpoint for weight migration")
+    parser.add_argument("--resume",           type=str, default=None,
+                        help="Resume a V8 checkpoint (same obs_dim required)")
     parser.add_argument("--minibatch",        type=int, default=MINIBATCH_SIZE)
     args = parser.parse_args()
 
@@ -653,7 +635,5 @@ if __name__ == "__main__":
         steps_per_worker = args.steps_per_worker,
         num_iterations   = args.iterations,
         resume_path      = args.resume,
-        migrate_v7_path  = args.migrate_v7,
-        migrate_v6_path  = args.migrate_v6,
         minibatch_size   = args.minibatch,
     )
