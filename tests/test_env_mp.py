@@ -5,7 +5,7 @@ import pytest
 from balatro_sim.env_mp import (
     MultiplayerBalatroEnv,
     MULTIPLAYER_BANNED_JOKERS, OBS_DIM,
-    R_PVP_WIN, R_PVP_LOSS, R_GAME_WIN, R_GAME_LOSS, R_LIFE_LOST,
+    R_PVP_WIN, R_PVP_LOSS, R_GAME_WIN, R_GAME_LOSS, R_DRAW_BONUS,
 )
 from balatro_sim.shop import random_joker_key, BANNED_JOKERS, generate_shop
 from balatro_sim.env_v7 import PHASE_SELECTING_HAND, PHASE_BLIND_SELECT
@@ -193,41 +193,24 @@ class TestIdentity:
 
 
 class TestRewards:
-    def test_pvp_win_reward_applied(self):
-        """When P1 wins PvP, P1 gets R_PVP_WIN, P2 gets R_PVP_LOSS + R_LIFE_LOST."""
-        env = MultiplayerBalatroEnv(seed=42, lives=4)
-        env.reset()
-        # Force MP state directly to simulate PvP resolution
-        from balatro_sim.mp_game import MPPhase
-        env.mp.phase = MPPhase.PVP_BLIND
-        # Manually trigger PvP resolution with P1 ahead
-        p1_reward_before = env._episode_reward[0]
-        p2_reward_before = env._episode_reward[1]
-        # Simulate both games being done with a PvP blind
-        env.mp.p1_game.chips_scored = 1000
-        env.mp.p2_game.chips_scored = 500
-        # We can't easily trigger the check without playing through, so just
-        # verify the reward constants are used in the _check_blind_resolution path
-        # by directly calling it
-        # ... actually this is hard to test without playing a full PvP blind
-        # Instead, test that the constants are exported
+    def test_reward_constants_sane(self):
+        """V8 Run 4 reward structure: PvP rewards bigger, no life loss penalty."""
         assert R_PVP_WIN > 0
         assert R_PVP_LOSS < 0
-        assert R_GAME_WIN > R_PVP_WIN
-        assert R_GAME_LOSS < R_PVP_LOSS
-
-    def test_life_loss_penalty_applied(self):
-        """When a player loses a life, they get R_LIFE_LOST penalty."""
-        assert R_LIFE_LOST < 0
+        assert R_GAME_WIN > R_PVP_WIN   # Game win worth more than PvP win
+        assert R_GAME_LOSS < R_PVP_LOSS # Game loss worse than PvP loss
+        assert R_DRAW_BONUS > 0         # Mutual survival bonus is positive
 
 
 class TestGameTermination:
-    def test_terminates_when_player_hits_zero_lives(self):
-        """Game should end when either player hits 0 lives."""
-        env = MultiplayerBalatroEnv(seed=42, lives=1)
+    def test_terminates_when_player_dies_on_regular_blind(self):
+        """V8 Run 4: regular blind failure = game over, survivor wins."""
+        env = MultiplayerBalatroEnv(seed=42)
         env.reset()
-        # Manually kill P1
-        env.mp.p1_lives = 0
+        # Force override to simulate a game-over state
+        from balatro_sim.mp_game import MPPhase
+        env.mp.phase = MPPhase.GAME_OVER
+        env._winner_override = 2
         # Next step should report done=True
         (p1_obs, p2_obs), (p1_r, p2_r), done, info = env.step(
             {"type": "phase", "action": 0},

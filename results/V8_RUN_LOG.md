@@ -185,6 +185,61 @@ decisions based on it:
 
 **496 tests passing.**
 
+**Status:** KILLED at iter 210 — HOUSE RULE broke the training signal
+
+**What happened:**
+
+At iter 210, solo evaluation showed 91% ante 1 death rate (vs V7's ~20%). The agent had failed to learn basic play. Feature importance analysis confirmed MP obs features WERE being used (7% of gradient magnitude, highest per-feature of any group), so the obs extension wasn't the issue.
+
+**Root cause identified:** HOUSE RULE + 4 lives made the environment too forgiving. The agent learned "failing blinds is OK, I have 4 lives" and optimized for accumulating small rewards (card quality, synergy) while burning lives rapidly. Avg MP game length: 29 steps (one player dying after 4 failures). Without time pressure (unlike real MP with clock), "retry forever" dominated "clear blinds well."
+
+Feature importance revealed:
+- MP obs features had highest per-feature gradient (policy WAS using them)
+- But the training signal rewarded failure + lives cycling
+- Basic blind-clearing competence never developed
+
+---
+
+## Run 4 — No Lives, Regular Blind Failure = Game Over
+
+**Major design change:** Remove lives system entirely. Match V7 solo training
+pressure but keep self-play comparison via same-seed and PvP.
+
+**Rules:**
+- Small/big blind failure → game ends, opponent wins (survivor gets +20, dead gets -10)
+- PvP blind: pure score comparison, NO death (winner +10, loser -5, both advance)
+- If both die on same blind same time: tiebreak by chips_scored on failing blind
+- Cap at ante 8; mutual survival through ante 8 PvP = draw with +5 bonus each
+- No lives system, no HOUSE RULE, no lookahead eval
+
+**Reward changes:**
+| Event | Run 3 | **Run 4** |
+|-------|:-:|:-:|
+| Game win | +20 | +20 (unchanged) |
+| Game loss | -10 | -10 (unchanged) |
+| PvP win | +3 | **+10** (3.3x bigger) |
+| PvP loss | -2 | **-5** (2.5x bigger) |
+| Life lost | -1.5 | **removed** |
+| Win look-ahead | ±5/-10 | **removed** |
+| HOUSE RULE revive | ON | **OFF** |
+| Mutual ante 8 survival | — | **+5 each (new)** |
+
+**Why this should work:**
+
+1. **Forces basic competence.** The agent MUST clear blinds or lose immediately. Same pressure as V7 solo (which reached ante 9 reliably).
+2. **Keeps MP signal.** Same-seed means both players face identical game states. When one dies, PPO gets clean gradient on which policy was better.
+3. **PvP rewards matter but don't kill.** Burst scoring ability gets reinforced (via +10 PvP win) but doesn't disrupt basic survival training.
+4. **Simpler code.** No lives tracking, no revive logic except for boss blind fails (pure code cleanup).
+
+**Smoke test results (2w × 128 steps × 2 iters):**
+- Before tiebreak fix: 33/34 games were draws (both players died on same blind simultaneously)
+- After tiebreak (higher chips on failed blind wins): 26 decisive, 3 draws
+- Iter 1: P1=11 / P2=15 / Draws=7 → Iter 2: 13/13/3
+
+**495 tests passing.**
+
+**Config:** 20 workers, 1024 steps/worker, 1000 iters, fresh from scratch
+
 **Status:** Ready to launch
 
 ---
