@@ -109,34 +109,34 @@ class ResidualBlock(nn.Module):
 
 class ActorCriticV7(nn.Module):
     """
-    V7 hierarchical actor-critic.
+    V7 hierarchical actor-critic, parameterized for scaling experiments.
 
-    Architecture:
-      input (obs_dim) -> embed(512) -> 4x ResBlock(512) -> trunk(512)
-      trunk -> intent_head(512, 3)
-      trunk + intent_embed(3, 32) -> card_head(544, 256, 8, sigmoid)
-      trunk -> phase_head(512, 17)
-      trunk -> critic(512, 1)
+    Architecture (with default hidden=512, n_res_blocks=4):
+      input (obs_dim) -> embed(H) -> N x ResBlock(H) -> trunk(H)
+      trunk -> intent_head(H, 3)
+      trunk + intent_embed(3, 32) -> card_head(H+32, H/2, 8, sigmoid)
+      trunk -> phase_head(H, 17)
+      trunk -> critic(H, 1)
 
-    ~2.5M params (for obs_dim=434)
-
-    obs_dim parameter added for V8 — defaults to V7's 434 for backward
-    compatibility, V8 passes 438 for extended multiplayer observation.
+    Default: ~2.5M params (hidden=512, blocks=4)
+    Scaling: hidden=1024, blocks=6 → ~12.5M params (5x for V7 Run 7)
     """
-    HIDDEN = 512
     INTENT_EMBED_DIM = 32
 
-    def __init__(self, obs_dim: int = OBS_DIM):
+    def __init__(self, obs_dim: int = OBS_DIM, hidden: int = 512, n_res_blocks: int = 4):
         super().__init__()
-        H = self.HIDDEN
+        H = hidden
         self.obs_dim = obs_dim
+        self.hidden = hidden
+        self.n_res_blocks = n_res_blocks
+        # Card head's middle layer scales with hidden (was hard-coded 256 for H=512)
+        card_hidden = max(H // 2, 64)
 
         # Shared trunk
         self.embed = nn.Sequential(nn.Linear(obs_dim, H), nn.ReLU())
-        self.res_blocks = nn.Sequential(
-            ResidualBlock(H), ResidualBlock(H),
-            ResidualBlock(H), ResidualBlock(H),
-        )
+        self.res_blocks = nn.Sequential(*[
+            ResidualBlock(H) for _ in range(n_res_blocks)
+        ])
 
         # Intent head (SELECTING_HAND)
         self.intent_head = nn.Linear(H, N_INTENTS)
@@ -144,9 +144,9 @@ class ActorCriticV7(nn.Module):
         # Card scoring head (conditioned on intent)
         self.intent_embed = nn.Embedding(N_INTENTS, self.INTENT_EMBED_DIM)
         self.card_head = nn.Sequential(
-            nn.Linear(H + self.INTENT_EMBED_DIM, 256),
+            nn.Linear(H + self.INTENT_EMBED_DIM, card_hidden),
             nn.ReLU(),
-            nn.Linear(256, N_HAND_SLOTS),
+            nn.Linear(card_hidden, N_HAND_SLOTS),
             nn.Sigmoid(),
         )
 
@@ -276,20 +276,23 @@ def compute_gae(rewards, values, dones, next_value):
 # ════════════════════════════════════════════════════════════════════════════
 
 def _worker_fn(worker_id: int, n_envs: int, steps_target: int,
-               conn: mp.connection.Connection, seed_base: int):
+               conn: mp.connection.Connection, seed_base: int,
+               hidden: int = 512, n_res_blocks: int = 4):
     """
     Worker process that runs n_envs in lockstep with batched inference.
 
     Optimization (Run 5+): Instead of sequential per-env inference, we collect
     obs from all n_envs at once, batch them, and do a SINGLE forward pass per
     step. CPU batched inference is ~10x faster per env-step than sequential calls.
+
+    hidden / n_res_blocks: network architecture (must match main policy).
     """
     import os, random as _random_mod
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     _rng = _random_mod.Random(seed_base + worker_id * 1000)
 
     envs = [BalatroV7Env(seed=_rng.randint(0, 2**31 - 1)) for _ in range(n_envs)]
-    policy = ActorCriticV7().cpu().eval()
+    policy = ActorCriticV7(hidden=hidden, n_res_blocks=n_res_blocks).cpu().eval()
 
     obs_list = [e.reset()[0] for e in envs]
     ep_steps = [0] * n_envs
@@ -691,13 +694,14 @@ def migrate_v6_weights(v6_path: str, model: ActorCriticV7):
 
 def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
           num_iterations: int, resume_path: str | None,
-          migrate_v6_path: str | None, minibatch_size: int = MINIBATCH_SIZE):
+          migrate_v6_path: str | None, minibatch_size: int = MINIBATCH_SIZE,
+          hidden: int = 512, n_res_blocks: int = 4, lr: float = LR):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = num_workers * envs_per_worker * steps_per_worker
 
-    policy = ActorCriticV7().to(device)
-    optimizer = optim.Adam(policy.parameters(), lr=LR, eps=1e-5)
+    policy = ActorCriticV7(hidden=hidden, n_res_blocks=n_res_blocks).to(device)
+    optimizer = optim.Adam(policy.parameters(), lr=lr, eps=1e-5)
 
     start_iter = 0
     total_steps = 0
@@ -726,7 +730,8 @@ def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
         conn_main, conn_worker = mp.Pipe()
         p = mp.Process(
             target=_worker_fn,
-            args=(wid, envs_per_worker, steps_per_worker, conn_worker, seed_base),
+            args=(wid, envs_per_worker, steps_per_worker, conn_worker, seed_base,
+                  hidden, n_res_blocks),
             daemon=True,
         )
         p.start()
@@ -739,9 +744,9 @@ def train(num_workers: int, envs_per_worker: int, steps_per_worker: int,
     print(f"  workers={num_workers}  envs/worker={envs_per_worker}  "
           f"steps/worker={steps_per_worker}")
     print(f"  batch_size={batch_size:,}  minibatch={minibatch_size}  epochs={N_EPOCHS}")
-    print(f"  obs={OBS_DIM}  intents={N_INTENTS}  phase_actions={N_PHASE_ACTIONS}  "
-          f"params={n_params:,}")
-    print(f"  device={device}")
+    print(f"  obs={OBS_DIM}  intents={N_INTENTS}  phase_actions={N_PHASE_ACTIONS}")
+    print(f"  network: hidden={hidden} blocks={n_res_blocks} params={n_params:,}")
+    print(f"  device={device}  lr={lr}")
     print(f"  intent_ent={INTENT_ENTROPY_COEFF}  subset_ent={SUBSET_ENTROPY_COEFF}  "
           f"phase_ent={ENTROPY_COEFF}")
     print(f"{'='*70}\n")
@@ -932,6 +937,13 @@ if __name__ == "__main__":
     parser.add_argument("--migrate-v6",       type=str, default=None,
                         help="Path to V6 checkpoint for weight migration")
     parser.add_argument("--minibatch",        type=int, default=MINIBATCH_SIZE)
+    # Run 7 scaling experiment: bigger network parameters
+    parser.add_argument("--hidden",           type=int, default=512,
+                        help="Hidden dim for trunk (default 512). Try 1024 for ~5x params.")
+    parser.add_argument("--res-blocks",       type=int, default=4,
+                        help="Number of residual blocks (default 4). Try 6 for ~5x params with hidden=1024.")
+    parser.add_argument("--lr",               type=float, default=LR,
+                        help="Learning rate (default 3e-4). Lower (e.g. 2e-4) for bigger networks.")
     args = parser.parse_args()
 
     train(
@@ -942,4 +954,7 @@ if __name__ == "__main__":
         resume_path      = args.resume,
         migrate_v6_path  = args.migrate_v6,
         minibatch_size   = args.minibatch,
+        hidden           = args.hidden,
+        n_res_blocks     = args.res_blocks,
+        lr               = args.lr,
     )

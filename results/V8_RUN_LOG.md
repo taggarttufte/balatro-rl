@@ -240,7 +240,55 @@ pressure but keep self-play comparison via same-seed and PvP.
 
 **Config:** 20 workers, 1024 steps/worker, 1000 iters, fresh from scratch
 
-**Status:** Ready to launch
+**Status:** COMPLETE (1000 iterations, ~41M steps, ~13 hours)
+
+**Final Results:**
+
+| Iter | Reward (P1/P2) | Wins (P1/P2/Draw) | Eps |
+|:-:|:-:|:-:|:-:|
+| 1 | 5.9 / 5.2 | 948/885/672 | 2505 |
+| 100 | 9.0 / 7.1 | 1027/903/512 | 2442 |
+| 500 | 7.6 / 7.6 | 974/960/379 | 2313 |
+| 1000 | 8.8 / 7.2 | 1116/968/225 | 2309 |
+
+**Last 50 iterations average:**
+- Reward: 8.64 / 7.19
+- Win split: 47.5% / 42.1% / 10.3% (P1/P2/Draw)
+
+**Outcome: Plateau.** Reward stayed flat at ~8 for 950 iterations after initial rise.
+The agent learned to clear at most ante 1 small blind, then died to ante 1 big or
+boss blind. Translation in reward terms: ~+8 from clearing one blind, then -10
+game loss balanced against +20 game win when opponent dies first.
+
+**Why this happened:**
+- Self-play with two equally weak policies provides limited learning signal
+- Each policy is calibrated against its own past performance, not against
+  external "good play" reward
+- Without HOUSE RULE buffer (V8 Run 3), failures hurt enough to define the game
+  but neither policy ever became competent enough to teach the other
+
+**Comparison to V7 Run 4 baseline (best result):**
+- V7 Run 4: 2.35% solo win rate, reached ante 9 reliably
+- V8 Run 4: ~0% solo win rate (would need eval to confirm), reached ante 1-2 only
+- **Self-play training is WORSE than solo training for this problem**
+
+**Key insight added to project takeaways:**
+For sample-efficient RL on long-horizon games, self-play between two beginner
+policies provides much weaker training signal than solo play against a fixed
+environment with shaped rewards. AlphaZero-style self-play works at
+massive compute scale because the network keeps challenging itself with new
+strategies; at our scale (one machine, hundreds of iterations), there's not
+enough exploration breadth to drive improvement past initial random discovery.
+
+---
+
+## Pivot to V7 Scaling Experiment
+
+V8 hit its ceiling. Pivoting to V7 architecture (proven 2.35% solo win rate
+baseline) for a clean scaling experiment. Hypothesis: does more network capacity
+break the V7 ceiling, or is the ceiling structural (reward shaping limits)?
+
+See [V7_RUN_LOG.md](V7_RUN_LOG.md) for V7 Run 7 (5x network + 64k batch).
 
 ---
 
