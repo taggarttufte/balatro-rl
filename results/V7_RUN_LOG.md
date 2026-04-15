@@ -448,6 +448,57 @@ The strong anti-synergy penalty created a perverse incentive: **do less to get p
 3. The "safe" strategy (Green+Space only, no diversity) avoids penalty AND gets the baseline 2% win rate
 4. PPO chose the safe path every time
 
+## Run 7 — Network Scaling Experiment (5x capacity + 64k batch) — **KILLED at iter 184**
+
+**Hypothesis:** Is the V7 ~2% ceiling a *capacity* limit (network too small to represent
+conditional strategies) or a *reward-shaping* limit (PPO can't discover multi-step
+strategies regardless of size)?
+
+**Config:**
+- Network: 13.6M params (hidden=1024, 8 res blocks — 5.5x baseline V7's 2.48M)
+- Batch: 64k steps/iter (20 workers × 3200 steps, vs baseline 32k)
+- LR: 1.5e-4 (lowered from 3e-4 for the bigger model)
+- Fresh from scratch, no migration
+- Checkpoints every 10 iters
+
+**Run stats (184 iters, ~11.6M steps, ~6 hours wall clock):**
+
+| Iter | Reward | Wins/Eps | WR | Best Ante | Notes |
+|:-:|:-:|:-:|:-:|:-:|---|
+| 1-10 | 17.4 | 9 / 43,147 | 0.02% | 9 | Warm-up, reached ante 9 by iter 7 |
+| 20-30 | **24.9 (peak)** | 74 / 39,295 | **0.19%** | 9 | Brief peak, then plateau |
+| 130-184 | 21.5 | 286 / 184,037 | 0.16% | 9 | Drift down, no further learning |
+| Overall | 21.85 | 995 / 679,680 | 0.15% | 9 | — |
+
+**Observations:**
+- Same "early peak then decay" shape as V7 Run 4 at comparable iter count, but lower WR
+- Iter time ~112-120s (vs ~35s baseline) — 3.5x slower despite 2x batch
+- Entropy collapsed similarly to baseline (intent_entropy 0.5-0.6 by iter 150)
+- Bigger network did NOT reach higher ante or discover new strategies — same ante 9 ceiling
+- Last-50 WR of 0.16% is *below* V7 Run 4's 2.35% at equivalent training progress
+
+**Decision to kill at iter 184:**
+
+The curve shape after 6 hours mirrored V7 Run 4's shape at the same training step count —
+same plateau pattern, no evidence of breakthrough. Continuing to 1000 iters (~36 more
+hours) would likely reproduce V7 Run 4's ~2% ceiling with a more expensive model.
+
+**Verdict: The plateau is structural, not a capacity limit.**
+
+5.5x more parameters + 2x larger batch did NOT break the ceiling. This is strong
+evidence that the reward-shaping regime (V7's hand-crafted scores) can only push PPO
+to a specific behavioral basin — one that happens to top out around 2% — regardless
+of how much network capacity is available. To discover qualitatively new strategies
+(conditional builds, multi-shop planning, joker positioning) we need a different
+**search mechanism**, not a bigger function approximator.
+
+**Project-concluding takeaway:** For long-horizon games like Balatro where winning
+requires coordinated multi-step strategies, shaped-reward PPO appears capacity-
+insensitive past a threshold. The next meaningful axis is *search* (MCTS, planning,
+or explicit exploration over strategy-level decisions) rather than *scale*.
+
+---
+
 ## Cross-Run Summary
 
 | Run | Overall WR | Last 50 WR | Avg Jokers | Coherence | Signature Finding |
@@ -458,6 +509,7 @@ The strong anti-synergy penalty created a perverse incentive: **do less to get p
 | Run 4 | 2.00% | 2.35% | 4.0 | 0.65 | Slot-scaled rewards + ante penalty worked |
 | Run 5 | 2.07% | 2.20% | 4.90 | 0.63 | Slot filling succeeded, win rate plateaued |
 | Run 6 | 2.07% | 2.23% | 3.33 | 0.58 | Coherence amplification BACKFIRED |
+| Run 7 | 0.15% (killed @184) | 0.16% | — | — | **5.5x network did not break ceiling** |
 
 ## The Plateau — Why V7 Ends at ~2%
 

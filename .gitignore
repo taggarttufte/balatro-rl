@@ -20,8 +20,12 @@ checkpoints_sim/
 checkpoints_v5/
 checkpoints_v7/
 checkpoints_v7_run*/
+checkpoints_v8/
+checkpoints_v8_run*/
 logs_sim/
 logs_v7/
+logs_v7_run*/
+logs_v8/
 *.log
 *.bundle
 
