@@ -8,6 +8,25 @@ A reinforcement learning agent that learns to play [Balatro](https://www.playbal
 
 ---
 
+## Watch the agent clear ante 9
+
+A full 91-step trajectory from a winning V7 Run 4 game (seed `1768285469`), rendered
+from the logged policy decisions. Shows the agent's aggressive early-skip strategy
+(collect tags on Small + Big blinds, engage only Bosses through ante 5), the switch
+to full engagement from ante 6 on, and the probability bars revealing how confident
+the policy was at each decision point.
+
+<video src="docs/media/v7_run4_replay.mp4" controls width="100%"></video>
+
+*Can't see the video inline? [Watch on YouTube](https://youtu.be/sw_9Ue72eVk).*
+
+The visualizer that generated this is in [`viz/`](viz/) — any episode from
+`scripts/eval_with_trajectory.py` can be dropped in as `viz/trajectory.json` and
+replayed. Scoring panel math (base chips × mult + joker contributions) is computed
+client-side from the logged game state.
+
+---
+
 ## What is Balatro?
 
 Balatro is a roguelike poker deckbuilder. You play poker hands to score chips against escalating point thresholds ("blinds"), buying joker modifiers between rounds to multiply your scoring. Clear 8 antes (24 blinds) to win.

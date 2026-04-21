@@ -35,6 +35,9 @@ logs_v8/
 # Keep plot scripts but not generated PNGs
 *.png
 
+# Eval output (regenerable; too large for repo)
+results/eval_trajectories.jsonl
+
 # Temp files
 .ipynb_checkpoints/
 .pytest_cache/
