@@ -16,9 +16,9 @@ from the logged policy decisions. Shows the agent's aggressive early-skip strate
 to full engagement from ante 6 on, and the probability bars revealing how confident
 the policy was at each decision point.
 
-<video src="docs/media/v7_run4_replay.mp4" controls width="100%"></video>
+[![V7 Run 4 agent clears ante 9](https://img.youtube.com/vi/sw_9Ue72eVk/maxresdefault.jpg)](https://youtu.be/sw_9Ue72eVk)
 
-*Can't see the video inline? [Watch on YouTube](https://youtu.be/sw_9Ue72eVk).*
+*Click to watch on YouTube. A local copy of the MP4 is also in [`docs/media/v7_run4_replay.mp4`](docs/media/v7_run4_replay.mp4).*
 
 The visualizer that generated this is in [`viz/`](viz/) — any episode from
 `scripts/eval_with_trajectory.py` can be dropped in as `viz/trajectory.json` and
