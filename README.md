@@ -27,9 +27,28 @@ client-side from the logged game state.
 
 ---
 
+## Version progression at a glance
+
+![Peak win rate across 8 architecture iterations](results/v1_v8_progression.png)
+
+The full story in one chart — from sub-random baselines through the first legitimate
+result (V6, 1.9%), the V7 hierarchical architecture peak (Run 4 at 2.35%), the
+reward-shape plateau (Runs 5-6), the failed 5.5× scaling test (Run 7), and the
+self-play dead end (V8).
+
+---
+
 ## What is Balatro?
 
 Balatro is a roguelike poker deckbuilder. You play poker hands to score chips against escalating point thresholds ("blinds"), buying joker modifiers between rounds to multiply your scoring. Clear 8 antes (24 blinds) to win.
+
+<p align="center">
+  <img src="docs/media/balatro_the_hook.png" width="49%" alt="Agent at 598/600 vs The Hook boss blind" />
+  <img src="docs/media/balatro_shop.png" width="49%" alt="Shop phase with jokers, booster packs, and a voucher" />
+</p>
+
+*Left: a nail-biter — the agent sits at 598/600 against* The Hook *(discards 2 random cards per hand).
+Right: a shop phase — 2 jokers, 2 booster packs, a voucher, and a reroll, all priced against limited cash.*
 
 **Why it's a hard RL problem:**
 

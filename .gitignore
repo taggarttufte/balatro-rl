@@ -34,6 +34,12 @@ logs_v8/
 
 # Keep plot scripts but not generated PNGs
 *.png
+# ...except these curated artifacts used in the README
+!docs/media/*.png
+!docs/media/*.jpg
+!docs/v2_training_progress.png
+!results/v1_v8_progression.png
+!results/training_progress.png
 
 # Eval output (regenerable; too large for repo)
 results/eval_trajectories.jsonl
