@@ -1,171 +1,120 @@
 """
-V1 -> V8 progression chart for the Balatro RL project README.
-Shows per-version ante-reached distribution as stacked horizontal bars:
-how many runs died at ante 1, made it to 2-3, 4-5, 6-8, or won.
+V1 -> V8 progression chart for the Balatro RL project README / Featured section.
+Data sourced from results/PROJECT_RETROSPECTIVE.md cross-version summary table.
 
-Data sources:
- - V1, V2, V3: preserved ante distributions from live-training logs/docs
- - V4: INVALIDATED (fixed seeds + broken Burglar joker; sim audit in V6 caught it)
- - V5, V6: approximated from win-rate + known failure modes (no loadable checkpoint
-   under the current V7 architecture)
- - V7 Run 4, V7 Runs 5-6, V7 Run 7, V8: fresh 5k-episode stochastic-policy eval
-   of each run's best checkpoint (see results/ante_distributions.json)
-
-Styled for GitHub dark-mode display.
+Styled for GitHub dark-mode README display. Color palette matches the viz/ UI.
+V4 is rendered as a distinct "INVALIDATED" bar so the full story arc is visible.
 """
-import json
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
 
-# ── Palette (matches viz/style.css and project dark theme) ─────────────────
-BG          = "#0d1117"
+# ── Color palette (matches viz/style.css) ──────────────────────────────────
+BG          = "#0d1117"   # GitHub dark mode background
 PANEL       = "#151c2a"
 TEXT        = "#e6edf3"
 TEXT_MUTED  = "#8b95a5"
 TEXT_FAINT  = "#5a6478"
 GRID        = "#262d3d"
 
-# Milestone colors: muted red -> orange -> gold -> green -> bright green
-C_DIED_1    = "#5b4a4a"   # died at ante 1 (muted)
-C_DIED_23   = "#a3622b"   # died at ante 2-3
-C_DIED_45   = "#c09731"   # died at ante 4-5
-C_DIED_68   = "#2f8c4a"   # died at ante 6-8
-C_WON       = "#4ade80"   # cleared ante 8 (won)
-C_INVALID   = "#6e7681"   # hatched invalidated bar
+C_FAIL      = "#4b5463"   # V1-V3, V5, V8 — real zeros
+C_INVALID   = "#6e7681"   # V4 — existed but measurements invalidated
+C_FIRST     = "#f4c430"   # V6 — first legitimate
+C_PEAK      = "#4ade80"   # V7 Run 4 — the peak
+C_PLATEAU   = "#22a852"   # V7 Runs 5-6 — plateau
+C_SCALE     = "#60a5fa"   # V7 Run 7 — scaling test
 
-DATA_PATH = Path(__file__).parent / "ante_distributions.json"
-with DATA_PATH.open() as f:
-    RAW = json.load(f)
-
-# Rows (keep explicit order so V4 slots between V3 and V5)
-ROWS = [
-    ("V1",          RAW["V1"],          None),
-    ("V2",          RAW["V2"],          None),
-    ("V3",          RAW["V3"],          None),
-    ("V4",          None,               "INVALIDATED"),   # fixed seeds + Burglar bug
-    ("V5",          RAW["V5 (approx)"], None),
-    ("V6",          RAW["V6 (approx)"], None),
-    ("V7 Run 4",    RAW["V7 Run 4"],    "peak"),
-    ("V7 Runs 5-6", RAW["V7 Runs 5-6"], None),
-    ("V7 Run 7",    RAW["V7 Run 7"],    None),
-    ("V8",          RAW["V8"],          None),
+# (label, peak_wr_pct, annotation, color, is_invalidated)
+versions = [
+    ("V1-V3",        0.01, "Live-game IPC · <0.01%\nRAM leak, ~14 sps",              C_FAIL,    False),
+    ("V4",           2.80, "Python-sim pivot · INVALIDATED\nfixed seeds + joker bugs", C_INVALID, True),
+    ("V5",           0.00, "Dual-agent split · 0%\nshop starvation (12 runs)",        C_FAIL,    False),
+    ("V6",           1.90, "Single-agent + combo ranker · 1.9%\nfirst legitimate result", C_FIRST,  False),
+    ("V7 Run 4",     2.35, "Hierarchical intent + card head · 2.35%\nPEAK",          C_PEAK,    False),
+    ("V7 Runs 5-6",  2.15, "Reward-shape retunes · 2.07 – 2.23%\nplateau confirmed", C_PLATEAU, False),
+    ("V7 Run 7",     0.16, "5.5× network scaling · 0.16%\nsame plateau, killed early", C_SCALE,   False),
+    ("V8 Runs 1-4",  0.00, "Self-play multiplayer · 0%\nsymmetry failures",          C_FAIL,    False),
 ]
 
+labels       = [v[0] for v in versions]
+vals         = [v[1] for v in versions]
+annotations  = [v[2] for v in versions]
+colors       = [v[3] for v in versions]
+invalidated  = [v[4] for v in versions]
+
 # ── Figure ─────────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(13, 8), facecolor=BG)
+fig, ax = plt.subplots(figsize=(12, 7), facecolor=BG)
 ax.set_facecolor(BG)
 
-y_pos = np.arange(len(ROWS))
-bar_h = 0.66
+y_pos = np.arange(len(versions))
+bars = ax.barh(
+    y_pos, vals, color=colors, alpha=0.95,
+    edgecolor=BG, linewidth=1.2,
+    height=0.62,
+)
 
-for i, (label, d, tag) in enumerate(ROWS):
-    if tag == "INVALIDATED":
-        # Hatched placeholder bar, spanning the chart to indicate it exists
-        # but has no meaningful distribution data
-        ax.barh(
-            i, 100, color=C_INVALID, alpha=0.22, height=bar_h,
-            hatch="////", edgecolor=TEXT_FAINT, linewidth=0.6,
-        )
-        ax.text(
-            50, i, "V4 INVALIDATED · fixed seeds + broken Burglar joker",
-            va="center", ha="center", fontsize=10, style="italic",
-            color=TEXT_MUTED,
-        )
-        continue
+# Dash pattern for V4 (invalidated) bar
+for bar, inv in zip(bars, invalidated):
+    if inv:
+        bar.set_hatch("////")
+        bar.set_edgecolor(TEXT_FAINT)
+        bar.set_linewidth(0.8)
+        bar.set_alpha(0.55)
 
-    m = d["milestones_pct"]
-    segments = [
-        (m["died_ante_1"],   C_DIED_1,  "died ante 1"),
-        (m["died_ante_2_3"], C_DIED_23, "died ante 2-3"),
-        (m["died_ante_4_5"], C_DIED_45, "died ante 4-5"),
-        (m["died_ante_6_8"], C_DIED_68, "died ante 6-8"),
-        (m["won"],           C_WON,     "won"),
-    ]
-    left = 0
-    for pct, color, _ in segments:
-        if pct <= 0:
-            continue
-        ax.barh(
-            i, pct, left=left, color=color, edgecolor=BG,
-            linewidth=0.8, height=bar_h,
-        )
-        left += pct
+# Highlight V7 Run 4 (the peak) with a glow-like double edge
+peak_idx = next(i for i, l in enumerate(labels) if l == "V7 Run 4")
+bars[peak_idx].set_edgecolor(C_PEAK)
+bars[peak_idx].set_linewidth(2.2)
 
-    # Annotate notable numbers on the right
-    anno_parts = [f"reached ante 2+: {100 - m['died_ante_1']:.1f}%"]
-    if m["won"] > 0:
-        anno_parts.append(f"won: {m['won']:.2f}%")
-    elif m["died_ante_6_8"] > 0:
-        anno_parts.append(f"reached late: {m['died_ante_6_8']:.1f}%")
-    ax.text(
-        101, i, "  ·  ".join(anno_parts),
-        va="center", fontsize=9.5, color=TEXT_MUTED,
-    )
-
-    # Mark the peak run
-    if tag == "peak":
-        ax.text(
-            -0.5, i, "★",
-            va="center", ha="right", fontsize=16, color=C_WON,
-            transform=ax.get_yaxis_transform(),
-        )
-
-# ── Axes ───────────────────────────────────────────────────────────────────
+# ── Axes styling ───────────────────────────────────────────────────────────
 ax.set_yticks(y_pos)
-ax.set_yticklabels([r[0] for r in ROWS], fontsize=12, fontweight="bold", color=TEXT)
+ax.set_yticklabels(labels, fontsize=12, fontweight="bold", color=TEXT)
 ax.invert_yaxis()
-ax.set_xlim(0, 100)
-ax.set_xticks([0, 25, 50, 75, 100])
-ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
 ax.tick_params(axis="x", colors=TEXT_MUTED, labelsize=10)
-ax.tick_params(axis="y", colors=TEXT, length=0, pad=10)
-ax.set_xlabel("Share of episodes (stacked by reached-ante milestone)",
-              fontsize=11, color=TEXT_MUTED, labelpad=10)
+ax.tick_params(axis="y", colors=TEXT, length=0, pad=8)
 
+ax.set_xlabel("Peak Solo Win Rate (%)", fontsize=11, color=TEXT_MUTED, labelpad=10)
 ax.set_title(
-    "Balatro RL · Version Progression by Reached Ante\n"
-    "where each version's runs died — not just whether they won",
+    "Balatro RL · Version Progression\n"
+    "8 architecture iterations · ~366 GPU-hours · RTX 3080 Ti",
     fontsize=14, pad=18, fontweight="bold", color=TEXT, loc="left",
 )
 
-# ── Legend (milestones) ────────────────────────────────────────────────────
-legend_items = [
-    Patch(facecolor=C_DIED_1,  label="died at ante 1"),
-    Patch(facecolor=C_DIED_23, label="died at ante 2-3"),
-    Patch(facecolor=C_DIED_45, label="died at ante 4-5"),
-    Patch(facecolor=C_DIED_68, label="died at ante 6-8"),
-    Patch(facecolor=C_WON,     label="won (cleared ante 8)"),
-]
-leg = ax.legend(
-    handles=legend_items, loc="lower right",
-    bbox_to_anchor=(1.0, -0.23), ncol=5,
-    frameon=True, fontsize=10, handlelength=1.4,
-    facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT,
-)
+# Per-bar annotations to the right of each bar
+for i, (v, ann, inv) in enumerate(zip(vals, annotations, invalidated)):
+    x_pos = max(v, 0.02) + 0.08
+    ax.text(
+        x_pos, i, ann,
+        va="center", fontsize=9.5,
+        color=TEXT_FAINT if inv else TEXT_MUTED,
+    )
 
-# Human-benchmark callout (top-right panel) — moved to avoid overlap with annotations
+# Reference lines
+ax.axvline(x=0.01, color=TEXT_FAINT, linestyle=":", alpha=0.5, linewidth=1.0)
+ax.text(0.03, -0.7, "random play ≈ 0.01%", fontsize=8.5,
+        color=TEXT_FAINT, style="italic")
+
+# Human-level benchmark callout (top-right)
 ax.text(
-    0.985, 1.03,
-    "skilled human ≈ 70% win rate (off-chart at this scale)",
-    transform=ax.transAxes, ha="right", va="bottom",
+    0.985, 0.97,
+    "skilled human ≈ 70% win rate\n(off-chart at this scale)",
+    transform=ax.transAxes, ha="right", va="top",
     fontsize=9, style="italic", color=TEXT_MUTED,
+    bbox=dict(boxstyle="round,pad=0.5",
+              facecolor=PANEL, edgecolor=GRID, linewidth=1),
 )
 
-# Data source note
+# V4 disclaimer
 ax.text(
-    0.0, -0.17,
-    "Sources: V1-V3 from preserved training logs · V4 hatched (invalidated in V6 audit) · "
-    "V5/V6 approximated from documented failure modes + win rate · "
-    "V7/V8 from 5k-episode evaluation of each run's best checkpoint · "
-    "N per row in results/ante_distributions.json",
+    0.0, -0.13,
+    "V4 bar shown hatched: reported ~2.8% win rate was memorization on fixed seeds "
+    "+ broken Burglar joker; both fixed in the V6 sim audit.",
     transform=ax.transAxes, ha="left", va="top",
-    fontsize=8.5, style="italic", color=TEXT_FAINT, wrap=True,
+    fontsize=8.5, style="italic", color=TEXT_FAINT,
 )
 
-# ── Spines and grid ────────────────────────────────────────────────────────
+# ── Clean up spines and grid ───────────────────────────────────────────────
+ax.set_xlim(0, 3.2)
 ax.grid(axis="x", color=GRID, alpha=0.7, linewidth=0.8)
 ax.set_axisbelow(True)
 for side in ("top", "right", "left"):
@@ -173,6 +122,6 @@ for side in ("top", "right", "left"):
 ax.spines["bottom"].set_color(GRID)
 
 plt.tight_layout()
-out = Path(__file__).parent / "v1_v8_progression.png"
+out = "v1_v8_progression.png"
 plt.savefig(out, dpi=180, bbox_inches="tight", facecolor=BG)
 print(f"Saved {out}")
