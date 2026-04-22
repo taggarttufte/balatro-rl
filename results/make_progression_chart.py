@@ -1,72 +1,127 @@
 """
 V1 -> V8 progression chart for the Balatro RL project README / Featured section.
 Data sourced from results/PROJECT_RETROSPECTIVE.md cross-version summary table.
+
+Styled for GitHub dark-mode README display. Color palette matches the viz/ UI.
+V4 is rendered as a distinct "INVALIDATED" bar so the full story arc is visible.
 """
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
 
-# (label, peak_wr_pct, annotation, color_category)
-# V4 excluded from the chart: "inflated" win rates were memorization + sim bugs, not legitimate
+# ── Color palette (matches viz/style.css) ──────────────────────────────────
+BG          = "#0d1117"   # GitHub dark mode background
+PANEL       = "#151c2a"
+TEXT        = "#e6edf3"
+TEXT_MUTED  = "#8b95a5"
+TEXT_FAINT  = "#5a6478"
+GRID        = "#262d3d"
+
+C_FAIL      = "#4b5463"   # V1-V3, V5, V8 — real zeros
+C_INVALID   = "#6e7681"   # V4 — existed but measurements invalidated
+C_FIRST     = "#f4c430"   # V6 — first legitimate
+C_PEAK      = "#4ade80"   # V7 Run 4 — the peak
+C_PLATEAU   = "#22a852"   # V7 Runs 5-6 — plateau
+C_SCALE     = "#60a5fa"   # V7 Run 7 — scaling test
+
+# (label, peak_wr_pct, annotation, color, is_invalidated)
 versions = [
-    ("V1-V3",        0.01, "Live-game IPC\n<0.01% (RAM leak, ~14 sps)",                    "gray"),
-    ("V5",           0.00, "Dual-agent split\nShop starvation (12 failed runs)",            "firebrick"),
-    ("V6",           1.90, "Single-agent + combo ranker\nFirst legitimate result",          "darkorange"),
-    ("V7 Run 4",     2.35, "Hierarchical intent + card-subset head\nPEAK -- 2.35%",         "seagreen"),
-    ("V7 Runs 5-6",  2.15, "Reward-shape retunes\nPlateau confirmed (2.07-2.23%)",          "mediumseagreen"),
-    ("V7 Run 7",     0.16, "5.5x network scaling (13.6M params)\nSame plateau, killed early","steelblue"),
-    ("V8 Runs 1-4",  0.00, "Self-play multiplayer\nMigration + symmetry failures",          "slategray"),
+    ("V1-V3",        0.01, "Live-game IPC · <0.01%\nRAM leak, ~14 sps",              C_FAIL,    False),
+    ("V4",           2.80, "Python-sim pivot · INVALIDATED\nfixed seeds + joker bugs", C_INVALID, True),
+    ("V5",           0.00, "Dual-agent split · 0%\nshop starvation (12 runs)",        C_FAIL,    False),
+    ("V6",           1.90, "Single-agent + combo ranker · 1.9%\nfirst legitimate result", C_FIRST,  False),
+    ("V7 Run 4",     2.35, "Hierarchical intent + card head · 2.35%\nPEAK",          C_PEAK,    False),
+    ("V7 Runs 5-6",  2.15, "Reward-shape retunes · 2.07 – 2.23%\nplateau confirmed", C_PLATEAU, False),
+    ("V7 Run 7",     0.16, "5.5× network scaling · 0.16%\nsame plateau, killed early", C_SCALE,   False),
+    ("V8 Runs 1-4",  0.00, "Self-play multiplayer · 0%\nsymmetry failures",          C_FAIL,    False),
 ]
 
 labels       = [v[0] for v in versions]
 vals         = [v[1] for v in versions]
 annotations  = [v[2] for v in versions]
 colors       = [v[3] for v in versions]
+invalidated  = [v[4] for v in versions]
 
-fig, ax = plt.subplots(figsize=(11, 6.5))
+# ── Figure ─────────────────────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(12, 7), facecolor=BG)
+ax.set_facecolor(BG)
+
 y_pos = np.arange(len(versions))
-bars = ax.barh(y_pos, vals, color=colors, alpha=0.9, edgecolor='black', linewidth=0.5)
+bars = ax.barh(
+    y_pos, vals, color=colors, alpha=0.95,
+    edgecolor=BG, linewidth=1.2,
+    height=0.62,
+)
 
-# Highlight V7 Run 4 (the peak)
-bars[3].set_edgecolor('black')
-bars[3].set_linewidth(2.0)
+# Dash pattern for V4 (invalidated) bar
+for bar, inv in zip(bars, invalidated):
+    if inv:
+        bar.set_hatch("////")
+        bar.set_edgecolor(TEXT_FAINT)
+        bar.set_linewidth(0.8)
+        bar.set_alpha(0.55)
 
+# Highlight V7 Run 4 (the peak) with a glow-like double edge
+peak_idx = next(i for i, l in enumerate(labels) if l == "V7 Run 4")
+bars[peak_idx].set_edgecolor(C_PEAK)
+bars[peak_idx].set_linewidth(2.2)
+
+# ── Axes styling ───────────────────────────────────────────────────────────
 ax.set_yticks(y_pos)
-ax.set_yticklabels(labels, fontsize=11, fontweight='bold')
+ax.set_yticklabels(labels, fontsize=12, fontweight="bold", color=TEXT)
 ax.invert_yaxis()
-ax.set_xlabel("Peak Solo Win Rate (%)", fontsize=11)
-ax.set_title("Balatro RL -- Version Progression\n"
-             "8 architecture iterations, ~366 GPU-hours, RTX 3080 Ti",
-             fontsize=13, pad=15, fontweight='bold')
+ax.tick_params(axis="x", colors=TEXT_MUTED, labelsize=10)
+ax.tick_params(axis="y", colors=TEXT, length=0, pad=8)
 
-# Per-bar annotation to the right
-for i, (v, ann) in enumerate(zip(vals, annotations)):
-    x_pos = v + 0.05 if v > 0.02 else 0.05
-    ax.text(x_pos, i, ann, va='center', fontsize=8.5, color='#222')
+ax.set_xlabel("Peak Solo Win Rate (%)", fontsize=11, color=TEXT_MUTED, labelpad=10)
+ax.set_title(
+    "Balatro RL · Version Progression\n"
+    "8 architecture iterations · ~366 GPU-hours · RTX 3080 Ti",
+    fontsize=14, pad=18, fontweight="bold", color=TEXT, loc="left",
+)
 
-# Reference lines (comparison benchmarks)
-ax.axvline(x=0.01, color='gray',      linestyle=':',  alpha=0.7, linewidth=1.2)
-ax.text(0.012, -0.55, "random play (~0.01%)", fontsize=8, color='gray', style='italic')
+# Per-bar annotations to the right of each bar
+for i, (v, ann, inv) in enumerate(zip(vals, annotations, invalidated)):
+    x_pos = max(v, 0.02) + 0.08
+    ax.text(
+        x_pos, i, ann,
+        va="center", fontsize=9.5,
+        color=TEXT_FAINT if inv else TEXT_MUTED,
+    )
 
-# Baselines callout (text only -- 70% human would blow up the x-axis scale)
-ax.text(0.99, 0.02, "For scale: skilled human ~70% win rate",
-        transform=ax.transAxes, ha='right', va='bottom',
-        fontsize=8.5, style='italic', color='#555',
-        bbox=dict(boxstyle='round,pad=0.35', fc='#fafafa', ec='#ccc'))
+# Reference lines
+ax.axvline(x=0.01, color=TEXT_FAINT, linestyle=":", alpha=0.5, linewidth=1.0)
+ax.text(0.03, -0.7, "random play ≈ 0.01%", fontsize=8.5,
+        color=TEXT_FAINT, style="italic")
 
-# V4 disclaimer (important for honesty)
-ax.text(0.01, -0.14,
-        "V4 (Python-sim pivot) excluded: reported win rates were memorization artifacts "
-        "from fixed seeds + 30% joker bugs (audited and fixed in V6).",
-        transform=ax.transAxes, ha='left', va='top',
-        fontsize=7.5, style='italic', color='#666', wrap=True)
+# Human-level benchmark callout (top-right)
+ax.text(
+    0.985, 0.97,
+    "skilled human ≈ 70% win rate\n(off-chart at this scale)",
+    transform=ax.transAxes, ha="right", va="top",
+    fontsize=9, style="italic", color=TEXT_MUTED,
+    bbox=dict(boxstyle="round,pad=0.5",
+              facecolor=PANEL, edgecolor=GRID, linewidth=1),
+)
 
-ax.set_xlim(0, 3.1)
-ax.grid(axis='x', alpha=0.25)
+# V4 disclaimer
+ax.text(
+    0.0, -0.13,
+    "V4 bar shown hatched: reported ~2.8% win rate was memorization on fixed seeds "
+    "+ broken Burglar joker; both fixed in the V6 sim audit.",
+    transform=ax.transAxes, ha="left", va="top",
+    fontsize=8.5, style="italic", color=TEXT_FAINT,
+)
+
+# ── Clean up spines and grid ───────────────────────────────────────────────
+ax.set_xlim(0, 3.2)
+ax.grid(axis="x", color=GRID, alpha=0.7, linewidth=0.8)
 ax.set_axisbelow(True)
-ax.spines['top'].set_visible(False)
-ax.spines['right'].set_visible(False)
+for side in ("top", "right", "left"):
+    ax.spines[side].set_visible(False)
+ax.spines["bottom"].set_color(GRID)
 
 plt.tight_layout()
-out = 'v1_v8_progression.png'
-plt.savefig(out, dpi=160, bbox_inches='tight', facecolor='white')
+out = "v1_v8_progression.png"
+plt.savefig(out, dpi=180, bbox_inches="tight", facecolor=BG)
 print(f"Saved {out}")

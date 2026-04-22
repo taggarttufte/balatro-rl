@@ -31,10 +31,11 @@ client-side from the logged game state.
 
 ![Peak win rate across 8 architecture iterations](results/v1_v8_progression.png)
 
-The full story in one chart — from sub-random baselines through the first legitimate
-result (V6, 1.9%), the V7 hierarchical architecture peak (Run 4 at 2.35%), the
-reward-shape plateau (Runs 5-6), the failed 5.5× scaling test (Run 7), and the
-self-play dead end (V8).
+The full arc in one chart — sub-random live-game baselines (V1-V3), the invalidated
+V4 result (hatched: fixed seeds + broken Burglar joker inflated the number),
+V6 as the first legitimate measurement (1.9%), the V7 hierarchical architecture
+peak (Run 4 at 2.35%), the reward-shape plateau (Runs 5-6), the failed 5.5× scaling
+test (Run 7), and the self-play dead end (V8).
 
 ---
 
