@@ -189,8 +189,13 @@ def topk_probs(probs: np.ndarray, names: list[str], k: int = 3) -> list[list]:
 
 
 def play_episode(policy: ActorCriticV7, seed: int, max_steps: int = 2000,
-                 log_probs: bool = True) -> dict:
-    """Play one full episode deterministically from seed and return trajectory."""
+                 log_probs: bool = True, greedy: bool = False) -> dict:
+    """Play one full episode deterministically from seed and return trajectory.
+
+    greedy=True: pick argmax of each policy head instead of sampling. Gives
+    deterministic, higher-WR "best deployment" performance. greedy=False (default)
+    samples per the Categorical/Bernoulli heads, matching training-time stochasticity.
+    """
     env = BalatroV7Env(seed=seed)
     obs, _ = env.reset()
     trajectory: list[dict] = []
@@ -217,8 +222,8 @@ def play_episode(policy: ActorCriticV7, seed: int, max_steps: int = 2000,
             mask_t = torch.from_numpy(mask).bool().unsqueeze(0)
             with torch.no_grad():
                 intent_dist = policy.forward_intent(trunk, mask_t)
-                intent = int(intent_dist.sample().item())
                 intent_probs = F.softmax(intent_dist.logits.squeeze(0), dim=-1).cpu().numpy()
+                intent = int(intent_dist.logits.argmax().item()) if greedy else int(intent_dist.sample().item())
                 card_scores = policy.forward_card_scores(
                     trunk, torch.tensor([intent])
                 ).squeeze(0).cpu().numpy()
@@ -230,7 +235,7 @@ def play_episode(policy: ActorCriticV7, seed: int, max_steps: int = 2000,
                 logits = compute_subset_logits(card_scores[:n_cards], subsets, intent)
                 sl = torch.from_numpy(logits).float()
                 sub_dist = torch.distributions.Categorical(logits=sl)
-                subset_idx = int(sub_dist.sample().item())
+                subset_idx = int(sl.argmax().item()) if greedy else int(sub_dist.sample().item())
                 subset = subsets[subset_idx]
 
             record["action"] = {
@@ -253,8 +258,8 @@ def play_episode(policy: ActorCriticV7, seed: int, max_steps: int = 2000,
             mask_t = torch.from_numpy(mask).bool().unsqueeze(0)
             with torch.no_grad():
                 phase_dist = policy.forward_phase(trunk, mask_t)
-                action = int(phase_dist.sample().item())
                 phase_probs = F.softmax(phase_dist.logits.squeeze(0), dim=-1).cpu().numpy()
+                action = int(phase_dist.logits.argmax().item()) if greedy else int(phase_dist.sample().item())
 
             record["action"] = {
                 "type":   "phase",
@@ -296,6 +301,8 @@ def main():
     ap.add_argument("--seed-base", type=int, default=None,
                     help="Base seed for RNG (default: time-based)")
     ap.add_argument("--max-steps", type=int, default=2000)
+    ap.add_argument("--greedy", action="store_true",
+                    help="Argmax instead of sampling (deployment-style eval)")
     args = ap.parse_args()
 
     out_path = Path(args.output)
@@ -319,7 +326,7 @@ def main():
     with open(out_path, "w") as f:
         for ep_id in range(args.n_episodes):
             seed = rng.randint(0, 2**31 - 1)
-            result = play_episode(policy, seed, max_steps=args.max_steps)
+            result = play_episode(policy, seed, max_steps=args.max_steps, greedy=args.greedy)
             result["episode_id"] = ep_id
             f.write(json.dumps(result) + "\n")
             f.flush()

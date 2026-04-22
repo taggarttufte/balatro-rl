@@ -29,13 +29,29 @@ client-side from the logged game state.
 
 ## Version progression at a glance
 
-![Peak win rate across 8 architecture iterations](results/v1_v8_progression.png)
+![Per-version ante-reached distribution across 8 architecture iterations](results/v1_v8_progression.png)
 
-The full arc in one chart — sub-random live-game baselines (V1-V3), the invalidated
-V4 result (hatched: fixed seeds + broken Burglar joker inflated the number),
-V6 as the first legitimate measurement (1.9%), the V7 hierarchical architecture
-peak (Run 4 at 2.35%), the reward-shape plateau (Runs 5-6), the failed 5.5× scaling
-test (Run 7), and the self-play dead end (V8).
+Peak win rate alone hides where each version actually failed. This chart breaks
+every version's runs down by the ante they died at — from "died at ante 1" on
+the left to "cleared ante 8" (won) on the right.
+
+A few things jump out:
+
+- **V2 learned early survival better than any later version** — 60% of runs reached
+  ante 2+, vs ~10% for V7. V2 plateaued around ante 3 though; it never developed
+  late-game strategy.
+- **V3 regressed from V2** because of the live-game RAM leak — the agent was
+  actively degrading during training.
+- **V7 has a different skill profile**: worse at early survival (~90% still die
+  at ante 1) but a long tail that actually reaches ante 9 (wins).
+- **V8's self-play signal looks almost identical to V7** — symmetry issues gave
+  neither policy a real opponent; they trained toward the same local optimum.
+
+V4 is shown hatched (invalidated by fixed-seed bug discovered in the V6 sim audit).
+V5/V6 distributions are approximated from documented failure modes because neither
+checkpoint loads under the current V7 architecture. Everything else is from fresh
+5,000-episode evaluation of each run's best checkpoint — see
+[`results/ante_distributions.json`](results/ante_distributions.json) for the raw counts.
 
 ---
 
